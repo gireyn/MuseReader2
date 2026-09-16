@@ -1,0 +1,71 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="sound/MS Basic.sf3">@MUSE_READER_SOUNDFONT_PATH@</file>
+    <file alias="fonts/FreeSans.ttf">@MUSESCORE_SOURCE_DIR@/fonts/FreeSans.ttf</file>
+    <file alias="fonts/FreeSerif.ttf">@MUSESCORE_SOURCE_DIR@/fonts/FreeSerif.ttf</file>
+    <file alias="fonts/FreeSerifBold.ttf">@MUSESCORE_SOURCE_DIR@/fonts/FreeSerifBold.ttf</file>
+    <file alias="fonts/FreeSerifItalic.ttf">@MUSESCORE_SOURCE_DIR@/fonts/FreeSerifItalic.ttf</file>
+    <file alias="fonts/FreeSerifBoldItalic.ttf">@MUSESCORE_SOURCE_DIR@/fonts/FreeSerifBoldItalic.ttf</file>
+    <file alias="fonts/mscoreTab.ttf">@MUSESCORE_SOURCE_DIR@/fonts/mscoreTab.ttf</file>
+    <file alias="fonts/mscore-BC.ttf">@MUSESCORE_SOURCE_DIR@/fonts/mscore-BC.ttf</file>
+    <file alias="fonts/bravura/Bravura.otf">@MUSESCORE_SOURCE_DIR@/fonts/bravura/Bravura.otf</file>
+    <file alias="fonts/bravura/BravuraText.otf">@MUSESCORE_SOURCE_DIR@/fonts/bravura/BravuraText.otf</file>
+    <file alias="fonts/campania/Campania.otf">@MUSESCORE_SOURCE_DIR@/fonts/campania/Campania.otf</file>
+    <file alias="fonts/edwin/Edwin-Roman.otf">@MUSESCORE_SOURCE_DIR@/fonts/edwin/Edwin-Roman.otf</file>
+    <file alias="fonts/edwin/Edwin-Bold.otf">@MUSESCORE_SOURCE_DIR@/fonts/edwin/Edwin-Bold.otf</file>
+    <file alias="fonts/edwin/Edwin-Italic.otf">@MUSESCORE_SOURCE_DIR@/fonts/edwin/Edwin-Italic.otf</file>
+    <file alias="fonts/edwin/Edwin-BdIta.otf">@MUSESCORE_SOURCE_DIR@/fonts/edwin/Edwin-BdIta.otf</file>
+    <file alias="fonts/gootville/Gootville.otf">@MUSESCORE_SOURCE_DIR@/fonts/gootville/Gootville.otf</file>
+    <file alias="fonts/gootville/GootvilleText.otf">@MUSESCORE_SOURCE_DIR@/fonts/gootville/GootvilleText.otf</file>
+    <file alias="fonts/leland/Leland.otf">@MUSESCORE_SOURCE_DIR@/fonts/leland/Leland.otf</file>
+    <file alias="fonts/leland/LelandText.otf">@MUSESCORE_SOURCE_DIR@/fonts/leland/LelandText.otf</file>
+    <file alias="fonts/mscore/mscore.ttf">@MUSESCORE_SOURCE_DIR@/fonts/mscore/mscore.ttf</file>
+    <file alias="fonts/mscore/MScoreText.ttf">@MUSESCORE_SOURCE_DIR@/fonts/mscore/MScoreText.ttf</file>
+    <file alias="fonts/musejazz/MuseJazz.otf">@MUSESCORE_SOURCE_DIR@/fonts/musejazz/MuseJazz.otf</file>
+    <file alias="fonts/musejazz/MuseJazzText.otf">@MUSESCORE_SOURCE_DIR@/fonts/musejazz/MuseJazzText.otf</file>
+    <file alias="fonts/petaluma/Petaluma.otf">@MUSESCORE_SOURCE_DIR@/fonts/petaluma/Petaluma.otf</file>
+    <file alias="fonts/petaluma/PetalumaText.otf">@MUSESCORE_SOURCE_DIR@/fonts/petaluma/PetalumaText.otf</file>
+    <file alias="fonts/petaluma/PetalumaScript.otf">@MUSESCORE_SOURCE_DIR@/fonts/petaluma/PetalumaScript.otf</file>
+
+    <file alias="fonts/mscore/metadata.json">@MUSESCORE_SOURCE_DIR@/fonts/mscore/metadata.json</file>
+    <file alias="fonts/gootville/metadata.json">@MUSESCORE_SOURCE_DIR@/fonts/gootville/metadata.json</file>
+    <file alias="fonts/leland/metadata.json">@MUSESCORE_SOURCE_DIR@/fonts/leland/metadata.json</file>
+    <file alias="fonts/bravura/metadata.json">@MUSESCORE_SOURCE_DIR@/fonts/bravura/bravura_metadata.json</file>
+    <file alias="fonts/musejazz/metadata.json">@MUSESCORE_SOURCE_DIR@/fonts/musejazz/metadata.json</file>
+    <file alias="fonts/petaluma/metadata.json">@MUSESCORE_SOURCE_DIR@/fonts/petaluma/petaluma_metadata.json</file>
+    <file alias="fonts/smufl/classes.json">@MUSESCORE_SOURCE_DIR@/fonts/smufl/classes.json</file>
+    <file alias="fonts/smufl/glyphnames.json">@MUSESCORE_SOURCE_DIR@/fonts/smufl/glyphnames.json</file>
+    <file alias="fonts/smufl/ranges.json">@MUSESCORE_SOURCE_DIR@/fonts/smufl/ranges.json</file>
+    <file alias="fonts/fonts_tablature.xml">@MUSESCORE_SOURCE_DIR@/fonts/fonts_tablature.xml</file>
+    <file alias="fonts/fonts_figuredbass.xml">@MUSESCORE_SOURCE_DIR@/fonts/fonts_figuredbass.xml</file>
+    <file alias="fonts_tablature.xml">@MUSESCORE_SOURCE_DIR@/fonts/fonts_tablature.xml</file>
+    <file alias="fonts_figuredbass.xml">@MUSESCORE_SOURCE_DIR@/fonts/fonts_figuredbass.xml</file>
+
+    <file alias="data/instruments.xml">@MUSESCORE_SOURCE_DIR@/share/instruments/instruments.xml</file>
+    <file alias="data/orders.xml">@MUSESCORE_SOURCE_DIR@/share/instruments/orders.xml</file>
+
+    <file alias="styles/Leland.mss">@MUSESCORE_SOURCE_DIR@/share/styles/Leland.mss</file>
+    <file alias="styles/Edwin.mss">@MUSESCORE_SOURCE_DIR@/share/styles/Edwin.mss</file>
+    <file alias="styles/legacy-style-defaults-v1.mss">@MUSESCORE_SOURCE_DIR@/share/styles/legacy-style-defaults-v1.mss</file>
+    <file alias="styles/legacy-style-defaults-v2.mss">@MUSESCORE_SOURCE_DIR@/share/styles/legacy-style-defaults-v2.mss</file>
+    <file alias="styles/legacy-style-defaults-v3.mss">@MUSESCORE_SOURCE_DIR@/share/styles/legacy-style-defaults-v3.mss</file>
+    <file alias="styles/chords_std.xml">@MUSESCORE_SOURCE_DIR@/share/styles/chords_std.xml</file>
+    <file alias="styles/chords.xml">@MUSESCORE_SOURCE_DIR@/share/styles/chords.xml</file>
+    <file alias="styles/chords_jazz.xml">@MUSESCORE_SOURCE_DIR@/share/styles/chords_jazz.xml</file>
+    <file alias="styles/jazzchords.xml">@MUSESCORE_SOURCE_DIR@/share/styles/jazzchords.xml</file>
+    <file alias="styles/stdchords.xml">@MUSESCORE_SOURCE_DIR@/share/styles/stdchords.xml</file>
+    <file alias="styles/cchords_muse.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_muse.xml</file>
+    <file alias="styles/cchords_nrb.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_nrb.xml</file>
+    <file alias="styles/cchords_rb.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_rb.xml</file>
+    <file alias="styles/cchords_sym.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_sym.xml</file>
+    <file alias="chords_std.xml">@MUSESCORE_SOURCE_DIR@/share/styles/chords_std.xml</file>
+    <file alias="chords.xml">@MUSESCORE_SOURCE_DIR@/share/styles/chords.xml</file>
+    <file alias="chords_jazz.xml">@MUSESCORE_SOURCE_DIR@/share/styles/chords_jazz.xml</file>
+    <file alias="jazzchords.xml">@MUSESCORE_SOURCE_DIR@/share/styles/jazzchords.xml</file>
+    <file alias="stdchords.xml">@MUSESCORE_SOURCE_DIR@/share/styles/stdchords.xml</file>
+    <file alias="cchords_muse.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_muse.xml</file>
+    <file alias="cchords_nrb.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_nrb.xml</file>
+    <file alias="cchords_rb.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_rb.xml</file>
+    <file alias="cchords_sym.xml">@MUSESCORE_SOURCE_DIR@/share/styles/cchords_sym.xml</file>
+  </qresource>
+</RCC>

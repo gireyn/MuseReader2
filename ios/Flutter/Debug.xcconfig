@@ -1,0 +1,4 @@
+#include "Generated.xcconfig"
+ARCHS=arm64
+SUPPORTED_PLATFORMS=iphoneos
+FRAMEWORK_SEARCH_PATHS=$(inherited) "$(PROJECT_DIR)/Frameworks"

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Kept as a named fallback for tools that inspect the launcher color. -->
+    <color name="ic_launcher_background">#2162B2</color>
+</resources>
