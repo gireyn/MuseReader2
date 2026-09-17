@@ -22,18 +22,26 @@ class MainActivity : FlutterActivity() {
         private const val FILE_CHANNEL = "com.musereader/files"
         private const val ENGINE_CHANNEL = "com.musereader/musescore_engine"
         private const val CONTROLS_CHANNEL = "com.musereader/controls"
+        private const val MEDIA_CHANNEL = "com.musereader/media"
         private const val PICK_SCORE_REQUEST = 4101
         private const val PICK_FOLDER_REQUEST = 4102
         private const val NOTIFICATION_PERMISSION_REQUEST = 4103
         private const val IMPORT_DIRECTORY = "muse_reader/imports"
         private const val FOLDER_PREFS = "muse_reader_folder"
+        private const val DISPLAY_PREFS = "muse_reader_display"
         private const val KEY_TREE_URI = "granted_tree_uri"
         private const val TAG = "MuseReaderAudio"
+        private val SCORE_EXTENSIONS = setOf("mscx", "mscz")
+        private val AUDIO_EXTENSIONS = setOf(
+            "mp3", "wav", "wave", "ogg", "oga", "opus", "flac",
+            "m4a", "aac", "mp4", "m4b", "wma", "aif", "aiff", "amr", "3gp",
+        )
     }
 
     private var pendingFileResult: MethodChannel.Result? = null
     private var pendingFolderResult: MethodChannel.Result? = null
     private var controlsChannel: MethodChannel? = null
+    private lateinit var mediaPlayer: MediaAudioPlayer
     private var notificationPermissionAsked = false
     private lateinit var fallbackSynth: SimpleScoreSynth
     private lateinit var fluidSynth: FluidScoreSynth
@@ -56,6 +64,57 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        // Audio-file playback (mp3/wav/ogg/flac/m4a/…). Engraved scores keep
+        // using the MuseScore/FluidSynth engine channel.
+        mediaPlayer = MediaAudioPlayer(this)
+        mediaPlayer.onCompleted = {
+            runOnUiThread {
+                runCatching { controls.invokeMethod("mediaCompleted", null) }
+            }
+        }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, MEDIA_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "load" -> {
+                        val path = call.argument<String>("path")
+                        if (path.isNullOrBlank()) {
+                            result.success(
+                                mapOf("available" to false, "error" to "音频路径为空"),
+                            )
+                        } else {
+                            mediaPlayer.load(path) { payload -> result.success(payload) }
+                        }
+                    }
+                    "play" -> {
+                        val started = mediaPlayer.play()
+                        if (started) {
+                            requestNotificationPermissionIfNeeded()
+                            PlaybackService.start(this@MainActivity)
+                        }
+                        result.success(started)
+                    }
+                    "pause" -> {
+                        mediaPlayer.pause()
+                        PlaybackService.stop(this@MainActivity)
+                        result.success(null)
+                    }
+                    "stop" -> {
+                        mediaPlayer.stop()
+                        PlaybackService.stop(this@MainActivity)
+                        result.success(null)
+                    }
+                    "seek" -> {
+                        mediaPlayer.seekTo(
+                            (call.argument<Number>("positionMs") ?: 0).toInt(),
+                        )
+                        result.success(null)
+                    }
+                    "position" -> result.success(mediaPlayer.positionMs())
+                    "isPlaying" -> result.success(mediaPlayer.isPlaying())
+                    else -> result.notImplemented()
+                }
+            }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, FILE_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -66,6 +125,33 @@ class MainActivity : FlutterActivity() {
                     "storedScoreFolderTree" -> result.success(
                         folderPreferences().getString(KEY_TREE_URI, null),
                     )
+                    "getBooleanPreference" -> result.success(
+                        displayPreferences().getBoolean(
+                            call.argument<String>("key") ?: "",
+                            false,
+                        ),
+                    )
+                    "setBooleanPreference" -> {
+                        val key = call.argument<String>("key")
+                        if (key.isNullOrBlank()) {
+                            result.success(null)
+                        } else {
+                            displayPreferences().edit()
+                                .putBoolean(key, call.argument<Boolean>("value") == true)
+                                .apply()
+                            result.success(null)
+                        }
+                    }
+                    "readAudioMetadata" -> {
+                        val paths = call.argument<List<String>>("paths") ?: emptyList()
+                        engineExecutor.execute {
+                            val payload = paths.map { path ->
+                                runCatching { MediaAudioPlayer.readMetadata(path) }
+                                    .getOrDefault(mapOf("path" to path))
+                            }
+                            runOnUiThread { result.success(payload) }
+                        }
+                    }
                     "pickScoreFolder" -> pickScoreFolder(result)
                     "listScoreFolderContents" -> {
                         val treeUri = call.argument<String>("treeUri")
@@ -217,7 +303,13 @@ class MainActivity : FlutterActivity() {
             type = "*/*"
             putExtra(
                 Intent.EXTRA_MIME_TYPES,
-                arrayOf("application/octet-stream", "application/zip", "text/xml", "application/xml"),
+                arrayOf(
+                    "application/octet-stream",
+                    "application/zip",
+                    "text/xml",
+                    "application/xml",
+                    "audio/*",
+                ),
             )
         }
         startActivityForResult(intent, PICK_SCORE_REQUEST)
@@ -292,6 +384,9 @@ class MainActivity : FlutterActivity() {
 
     private fun folderPreferences() =
         getSharedPreferences(FOLDER_PREFS, Context.MODE_PRIVATE)
+
+    private fun displayPreferences() =
+        getSharedPreferences(DISPLAY_PREFS, Context.MODE_PRIVATE)
 
     /**
      * Keep imported scores in the app's files directory instead of cacheDir.
@@ -478,9 +573,13 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    private fun isSupportedScoreFile(name: String): Boolean {
+    private fun isSupportedScoreFile(name: String): Boolean =
+        isSupportedMediaFile(name)
+
+    /** Scores and audio files the library can list and play. */
+    private fun isSupportedMediaFile(name: String): Boolean {
         val extension = name.substringAfterLast('.', "").lowercase()
-        return extension == "mscx" || extension == "mscz"
+        return extension in SCORE_EXTENSIONS || extension in AUDIO_EXTENSIONS
     }
 
     private fun displayName(uri: Uri): String {
@@ -534,6 +633,7 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         if (::fluidSynth.isInitialized) fluidSynth.stop()
         if (::fallbackSynth.isInitialized) fallbackSynth.stop()
+        if (::mediaPlayer.isInitialized) mediaPlayer.stop()
         PlaybackService.pauseRequest = null
         PlaybackService.stop(this)
         engineExecutor.shutdownNow()

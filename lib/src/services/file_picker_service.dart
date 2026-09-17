@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import '../model/score_library_entry.dart';
+
 /// One directory or score file inside a granted (SAF) directory tree.
 class FolderEntry {
   const FolderEntry({
@@ -173,8 +175,69 @@ class FilePickerService {
     }
   }
 
-  static bool _isSupportedScorePath(String path) {
-    final normalized = path.toLowerCase();
-    return normalized.endsWith('.mscx') || normalized.endsWith('.mscz');
+  /// Boolean display preference persisted by the platform side (for example
+  /// the 内部标题 toggle). Falls back to [fallback] when unavailable.
+  Future<bool> readBooleanPreference(
+    String key, {
+    bool fallback = false,
+  }) async {
+    try {
+      final value = await _channel.invokeMethod<bool>('getBooleanPreference', {
+        'key': key,
+      });
+      return value ?? fallback;
+    } on MissingPluginException {
+      return fallback;
+    } on PlatformException {
+      return fallback;
+    } on Object {
+      return fallback;
+    }
   }
+
+  Future<void> writeBooleanPreference(String key, bool value) async {
+    try {
+      await _channel.invokeMethod<void>('setBooleanPreference', {
+        'key': key,
+        'value': value,
+      });
+    } on MissingPluginException {
+      // Desktop/test embedders have no preference store.
+    } on PlatformException {
+      // A failed write must never break the UI.
+    } on Object {
+      // Same as above.
+    }
+  }
+
+  /// Reads embedded audio tags (title/artist) and the duration of [paths] with
+  /// Android's MediaMetadataRetriever. Off-thread on the platform side; returns
+  /// one map per readable path with `path`, `title`, `artist`, `durationMs`.
+  Future<List<Map<dynamic, dynamic>>> readAudioMetadata(
+    List<String> paths,
+  ) async {
+    if (paths.isEmpty) return const [];
+    try {
+      // No artificial timeout here: an embedder without the method raises
+      // MissingPluginException, which is handled below. (A short timeout would
+      // race slow tag reads on large folders.)
+      final raw = await _channel.invokeMethod<List<dynamic>>(
+        'readAudioMetadata',
+        <String, Object>{'paths': paths},
+      );
+      if (raw == null) return const [];
+      return [
+        for (final item in raw)
+          if (item is Map) item,
+      ];
+    } on MissingPluginException {
+      return const [];
+    } on PlatformException {
+      return const [];
+    } on Object {
+      return const [];
+    }
+  }
+
+  static bool _isSupportedScorePath(String path) => isSupportedMediaPath(path);
 }

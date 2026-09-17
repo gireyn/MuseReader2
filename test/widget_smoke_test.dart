@@ -27,9 +27,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('谱面库'), findsOneWidget);
-    expect(find.text('MuseReader Demo'), findsOneWidget);
+    // 内部标题 is off by default, so cards show the file name.
+    expect(find.text('reader-demo'), findsOneWidget);
+    expect(find.text('内部标题'), findsOneWidget);
 
-    await tester.tap(find.text('MuseReader Demo'));
+    await tester.tap(find.text('reader-demo'));
     await tester.pumpAndSettle();
 
     // Composer text is part of the engraved page image, not the transport

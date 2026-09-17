@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../model/score_document.dart';
+import '../model/audio_item.dart';
 import '../model/score_library_entry.dart';
 import '../playback/playback_controller.dart';
 import '../playback/score_queue.dart';
@@ -45,6 +48,14 @@ class _LibraryPageState extends State<LibraryPage> {
   /// Source paths of hydrated documents, most recently used first. Mirrors
   /// the collection so eviction never touches an entry outside this list.
   final _retentionOrder = <String>[];
+
+  /// Preference key of the 内部标题 toggle (persisted on the platform side).
+  static const _useInternalTitlesKey = 'use_internal_titles';
+
+  /// 内部标题: when false (the default) cards and the reader header show the
+  /// file name without extension and hide the author.
+  bool _useInternalTitles = false;
+
   ReaderQueue? _queue;
   bool _loading = true;
   String? _error;
@@ -55,7 +66,20 @@ class _LibraryPageState extends State<LibraryPage> {
     super.initState();
     MediaCommands.attach();
     MediaCommands.onMemoryPressure = _handleMemoryPressure;
+    unawaited(_restoreDisplayPreferences());
     _loadLibrary();
+  }
+
+  Future<void> _restoreDisplayPreferences() async {
+    final stored = await _picker.readBooleanPreference(_useInternalTitlesKey);
+    if (!mounted || stored == _useInternalTitles) return;
+    setState(() => _useInternalTitles = stored);
+  }
+
+  void _setUseInternalTitles(bool value) {
+    if (_useInternalTitles == value) return;
+    setState(() => _useInternalTitles = value);
+    unawaited(_picker.writeBooleanPreference(_useInternalTitlesKey, value));
   }
 
   @override
@@ -118,6 +142,7 @@ class _LibraryPageState extends State<LibraryPage> {
       _error = firstError;
     });
     _syncQueue();
+    unawaited(_applyAudioMetadata(uniquePaths));
 
     // Metadata and thumbnail sidecars are small and can hydrate after the
     // first usable library frame. Full MuseScore documents are loaded only
@@ -131,11 +156,18 @@ class _LibraryPageState extends State<LibraryPage> {
         final index = _entries.indexWhere(
           (entry) => entry.sourcePath == cached.sourcePath,
         );
-        if (index >= 0 && _entries[index].document == null) {
+        // Audio entries carry their own tag metadata; the score sidecar cache
+        // must not replace them with an empty placeholder.
+        if (index >= 0 &&
+            _entries[index].document == null &&
+            !_entries[index].isAudio) {
           _entries[index] = cached;
         }
       }
     });
+    // Tags/durations are read from the platform after the cache phase so they
+    // are not overwritten by it.
+    await _applyAudioMetadata(uniquePaths);
   }
 
   Future<void> _reloadLibrary() async {
@@ -161,9 +193,8 @@ class _LibraryPageState extends State<LibraryPage> {
   Future<void> _importScore() async {
     final path = await _picker.pickScoreFile();
     if (!mounted || path == null) return;
-    final extension = path.split('.').last.toLowerCase();
-    if (extension != 'mscx' && extension != 'mscz') {
-      _showMessage('请选择 MSCX 或 MSCZ 谱面文件。');
+    if (!isSupportedMediaPath(path)) {
+      _showMessage('请选择 MSCX/MSCZ 谱面或 MP3/WAV/OGG/FLAC/M4A 等音频文件。');
       return;
     }
     final entry = ScoreLibraryEntry.placeholder(path);
@@ -173,6 +204,7 @@ class _LibraryPageState extends State<LibraryPage> {
       _error = null;
     });
     _syncQueue();
+    if (entry.isAudio) unawaited(_applyAudioMetadata([path]));
     await _openEntry(entry);
   }
 
@@ -202,7 +234,7 @@ class _LibraryPageState extends State<LibraryPage> {
     });
     _syncQueue();
     _showMessage(
-      uniquePaths.isEmpty ? '所选目录中没有可用的谱面文件' : '已导入 ${uniquePaths.length} 份谱面',
+      uniquePaths.isEmpty ? '所选目录中没有可用的谱面文件' : '已导入 ${uniquePaths.length} 个文件',
     );
 
     // Metadata and thumbnail sidecars are small and can hydrate quietly; the
@@ -216,9 +248,44 @@ class _LibraryPageState extends State<LibraryPage> {
         final index = _entries.indexWhere(
           (entry) => entry.sourcePath == cached.sourcePath,
         );
-        if (index >= 0 && _entries[index].document == null) {
+        if (index >= 0 &&
+            _entries[index].document == null &&
+            !_entries[index].isAudio) {
           _entries[index] = cached;
         }
+      }
+    });
+    await _applyAudioMetadata(uniquePaths);
+  }
+
+  /// Reads embedded audio tags (title/artist) and durations for the audio
+  /// files of the collection; scores are untouched.
+  Future<void> _applyAudioMetadata(List<String> paths) async {
+    final audioPaths = [
+      for (final path in paths)
+        if (isAudioPath(path)) path,
+    ];
+    if (audioPaths.isEmpty) return;
+    final metadata = await _picker.readAudioMetadata(audioPaths);
+    if (!mounted || metadata.isEmpty) return;
+    final byPath = <String, Map<dynamic, dynamic>>{
+      for (final item in metadata)
+        if (item['path'] is String) item['path'] as String: item,
+    };
+    setState(() {
+      for (var index = 0; index < _entries.length; index++) {
+        final entry = _entries[index];
+        if (!entry.isAudio) continue;
+        final info = byPath[entry.sourcePath];
+        if (info == null) continue;
+        final durationMs = info['durationMs'];
+        _entries[index] = entry.withAudioMetadata(
+          title: info['title'] as String?,
+          artist: info['artist'] as String?,
+          durationUs: durationMs is num
+              ? (durationMs.toDouble() * 1000).round()
+              : null,
+        );
       }
     });
   }
@@ -234,7 +301,8 @@ class _LibraryPageState extends State<LibraryPage> {
     }
     try {
       final hydrated = await _loadEntryById(entry.sourcePath);
-      if (!mounted || hydrated.document == null) return;
+      if (!mounted) return;
+      if (hydrated.document == null && !hydrated.isAudio) return;
       _openReader(hydrated);
     } catch (error) {
       if (!mounted) return;
@@ -254,6 +322,11 @@ class _LibraryPageState extends State<LibraryPage> {
       throw StateError('谱面不在当前谱面库中：$sourcePath');
     }
     final entry = _entries[indexOf];
+    if (entry.isAudio) {
+      // Audio items carry their metadata; the platform media player opens the
+      // file when playback actually starts.
+      return entry;
+    }
     final loaded = entry.document;
     if (loaded != null) return entry;
     if (!_openingPaths.add(sourcePath)) {
@@ -313,16 +386,19 @@ class _LibraryPageState extends State<LibraryPage> {
 
   void _openReader(ScoreLibraryEntry entry, {bool autoplay = false}) {
     final queue = _queue;
+    if (queue == null) return;
     final document = entry.document;
-    if (queue == null || document == null) return;
+    if (document == null && !entry.isAudio) return;
     queue.setCurrentId(entry.sourcePath);
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => ReaderPage(
           document: document,
+          audio: entry.isAudio ? AudioItem.fromEntry(entry) : null,
           queue: queue,
           loadEntry: _loadEntryById,
           autoplay: autoplay,
+          useInternalTitles: _useInternalTitles,
         ),
       ),
     );
@@ -342,7 +418,8 @@ class _LibraryPageState extends State<LibraryPage> {
     queue.setCurrentId(chosen);
     try {
       final hydrated = await _loadEntryById(chosen);
-      if (!mounted || hydrated.document == null) return;
+      if (!mounted) return;
+      if (hydrated.document == null && !hydrated.isAudio) return;
       _openReader(hydrated, autoplay: true);
     } catch (error) {
       if (!mounted) return;
@@ -450,6 +527,8 @@ class _LibraryPageState extends State<LibraryPage> {
                       onOpenFolder: _loading ? null : _importFolder,
                       documentCount: _entries.length,
                       loading: _loading,
+                      useInternalTitles: _useInternalTitles,
+                      onToggleInternalTitles: _setUseInternalTitles,
                     ),
                   ),
                 ),
@@ -479,6 +558,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     entries: const [],
                     openingPaths: const {},
                     onOpen: _openEntry,
+                    useInternalTitles: _useInternalTitles,
                   )
                 else if (_entries.isEmpty)
                   SliverFillRemaining(
@@ -496,6 +576,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     entries: _entries,
                     openingPaths: _openingPaths,
                     onOpen: _openEntry,
+                    useInternalTitles: _useInternalTitles,
                   ),
               ],
             );
@@ -558,12 +639,19 @@ class _LibraryHeader extends StatelessWidget {
     required this.onOpenFolder,
     required this.documentCount,
     required this.loading,
+    required this.useInternalTitles,
+    required this.onToggleInternalTitles,
   });
 
   final VoidCallback? onImport;
   final VoidCallback? onOpenFolder;
   final int documentCount;
   final bool loading;
+
+  /// 内部标题: show the files' own metadata titles/authors instead of the
+  /// file names (author hidden when off).
+  final bool useInternalTitles;
+  final ValueChanged<bool> onToggleInternalTitles;
 
   @override
   Widget build(BuildContext context) {
@@ -591,16 +679,30 @@ class _LibraryHeader extends StatelessWidget {
       icon: const Icon(Icons.add_rounded),
       label: const Text('打开目录'),
     );
+    final titleToggle = _InternalTitleToggle(
+      value: useInternalTitles,
+      onChanged: onToggleInternalTitles,
+    );
     final scaledBody = MediaQuery.textScalerOf(context).scale(14);
     return LayoutBuilder(
       builder: (context, constraints) {
         final stacked = constraints.maxWidth < 520 || scaledBody > 18;
         if (stacked) {
+          // 内部标题 sits directly above 打开目录 with the same width: the row
+          // mirrors the two-button row below, so the right half lines up.
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               title,
-              const SizedBox(height: 16),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  const Spacer(),
+                  const SizedBox(width: 12),
+                  Expanded(child: titleToggle),
+                ],
+              ),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   Expanded(child: importButton),
@@ -618,10 +720,68 @@ class _LibraryHeader extends StatelessWidget {
             const SizedBox(width: 24),
             importButton,
             const SizedBox(width: 12),
-            folderButton,
+            IntrinsicWidth(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  titleToggle,
+                  const SizedBox(height: 8),
+                  folderButton,
+                ],
+              ),
+            ),
           ],
         );
       },
+    );
+  }
+}
+
+/// 内部标题 button: a square tick on the left of the label; the whole button
+/// toggles (the square itself is not separately interactive), styled like the
+/// other header buttons.
+class _InternalTitleToggle extends StatelessWidget {
+  const _InternalTitleToggle({required this.value, required this.onChanged});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Semantics(
+      checked: value,
+      label: '内部标题',
+      child: OutlinedButton(
+        onPressed: () => onChanged(!value),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          foregroundColor: theme.colorScheme.onSurface,
+          side: BorderSide(
+            color: value
+                ? theme.colorScheme.primary
+                : theme.colorScheme.outlineVariant,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IgnorePointer(
+              child: Checkbox(
+                value: value,
+                onChanged: (_) {},
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                side: BorderSide(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Flexible(
+              child: Text('内部标题', maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -634,6 +794,7 @@ class _LibraryItems extends StatelessWidget {
     required this.entries,
     required this.openingPaths,
     required this.onOpen,
+    required this.useInternalTitles,
   });
 
   final double horizontalPadding;
@@ -642,6 +803,7 @@ class _LibraryItems extends StatelessWidget {
   final List<ScoreLibraryEntry> entries;
   final Set<String> openingPaths;
   final ValueChanged<ScoreLibraryEntry> onOpen;
+  final bool useInternalTitles;
 
   @override
   Widget build(BuildContext context) {
@@ -653,6 +815,7 @@ class _LibraryItems extends StatelessWidget {
         entry: entry,
         opening: openingPaths.contains(entry.sourcePath),
         onTap: () => onOpen(entry),
+        useInternalTitles: useInternalTitles,
       );
     }
 
@@ -689,19 +852,30 @@ class _ScoreCard extends StatelessWidget {
     required this.entry,
     required this.opening,
     required this.onTap,
+    required this.useInternalTitles,
   });
 
   final ScoreLibraryEntry entry;
   final bool opening;
   final VoidCallback onTap;
+  final bool useInternalTitles;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final format = entry.format == ScoreFormat.mscz ? 'MSCZ' : 'MSCX';
-    final composer = entry.composer.isEmpty ? entry.fileName : entry.composer;
+    final format = entry.isAudio
+        ? mediaFormatLabel(entry.fileName)
+        : (entry.format == ScoreFormat.mscz ? 'MSCZ' : 'MSCX');
+    final title = libraryDisplayTitle(
+      entry,
+      useInternalTitles: useInternalTitles,
+    );
+    final composer = libraryDisplayAuthor(
+      entry,
+      useInternalTitles: useInternalTitles,
+    );
     final semantics = [
-      opening ? '正在打开谱面 ${entry.title}' : '打开谱面 ${entry.title}',
+      opening ? '正在打开 $title' : '打开 $title',
       if (composer.isNotEmpty) composer,
       format,
       if (entry.pageCount != null) '${entry.pageCount} 页',
@@ -734,20 +908,22 @@ class _ScoreCard extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              entry.title,
+                              title,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: theme.textTheme.titleMedium,
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              composer,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
+                            if (composer.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                composer,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
                               ),
-                            ),
+                            ],
                             const SizedBox(height: 14),
                             Wrap(
                               spacing: 10,
@@ -819,7 +995,9 @@ class _ScorePreview extends StatelessWidget {
     final fallback = page == null
         ? Center(
             child: Icon(
-              Icons.music_note_rounded,
+              entry.isAudio
+                  ? Icons.audiotrack_rounded
+                  : Icons.music_note_rounded,
               color: Theme.of(context).colorScheme.primary,
               size: 28,
             ),

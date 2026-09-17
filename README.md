@@ -35,6 +35,22 @@ MuseScore/Xen Tuner 等插件写入的每个音符 `Note::tuning`（单位为 ce
 MuseScore `<Events>` 的装饰音/分解播放事件也会保留其相对音高和时值。FluidSynth
 音频后端不可用时，Android/iOS 的兼容振荡器使用相同的频率公式作为开发期备用路径。
 
+## 内部标题与音频文件
+
+谱面库标题行中，“内部标题”按钮位于“打开目录”正上方、与之同宽（默认关闭）：
+关闭时卡片与阅读器标题显示**去掉扩展名的文件名**并隐藏作者；开启时显示文件
+自身的元数据标题与作者。该开关通过平台侧偏好（`use_internal_titles`）持久保存，
+对谱面与音频一视同仁。
+
+音频文件是收藏中的一等条目：`mp3, wav, wave, ogg, oga, opus, flac, m4a, aac,
+mp4, m4b, wma, aif, aiff, amr, 3gp` 均可被单文件导入、目录导入与谱面库列表识别。
+它们通过与 mscz_an_Audio 相同的 Android `MediaPlayer` 后端播放（`com.musereader/media`
+通道），并复用完全相同的传输控制：播放/暂停/重播/拖动进度、上一首/下一首、全部循环
+模式、黄金比例随机记忆、播完自动续播、“开始随机”，以及借助前台服务与唤醒锁实现的
+息屏后台播放。标题/艺术家标签与时长来自 `MediaMetadataRetriever`：开启“内部标题”
+时显示标签，关闭时显示文件名。音频条目的播放区域显示“音频文件（无谱面）”面板并隐藏
+页码导航，谱面与音频可混合在同一收藏中。
+
 ## 构建与打包
 
 要求 macOS、Xcode、Flutter、CMake、`curl`、`bsdtar`、`shasum`，以及相邻目录中的 MuseScore 源码：

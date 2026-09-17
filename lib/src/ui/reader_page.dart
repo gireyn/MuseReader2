@@ -3,9 +3,12 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../model/audio_item.dart';
 import '../model/score_document.dart';
 import '../model/score_library_entry.dart';
+import '../playback/audio_playback_controller.dart';
 import '../playback/playback_controller.dart';
+import '../playback/playback_handle.dart';
 import '../playback/score_queue.dart';
 import '../services/media_commands.dart';
 import 'score_page_painter.dart';
@@ -13,13 +16,26 @@ import 'score_page_painter.dart';
 class ReaderPage extends StatefulWidget {
   const ReaderPage({
     super.key,
-    required this.document,
+    this.document,
+    this.audio,
     this.queue,
     this.loadEntry,
     this.autoplay = false,
-  });
+    this.useInternalTitles = true,
+  }) : assert(
+         document != null || audio != null,
+         'ReaderPage needs either a score document or an audio item.',
+       );
 
-  final ScoreDocument document;
+  /// Engraved MuseScore document; null when [audio] is set.
+  final ScoreDocument? document;
+
+  /// Audio file played by the platform media player; null for scores.
+  final AudioItem? audio;
+
+  /// 内部标题: when false the header shows the file name (no extension) and
+  /// the author line is hidden.
+  final bool useInternalTitles;
 
   /// Play queue of the current collection, carrying the hidden golden-ratio
   /// memory and the loop mode. When null (standalone usage, tests) the
@@ -41,23 +57,46 @@ class ReaderPage extends StatefulWidget {
 class _ReaderPageState extends State<ReaderPage> {
   static const _restartBackThresholdUs = 3 * 1000 * 1000;
 
-  late ScoreDocument _document;
-  late PlaybackController _playback;
+  ScoreDocument? _document;
+  AudioItem? _audio;
+  late PlaybackHandle _playback;
   GlobalKey<_MultiPageScoreViewportState> _scoreViewportKey =
       GlobalKey<_MultiPageScoreViewportState>();
   int _visiblePage = 0;
   bool _switching = false;
   bool _wasPlaying = false;
 
+  /// Score-specific view of the transport (null while an audio file plays).
+  PlaybackController? get _scorePlayback =>
+      _document == null || _playback is! PlaybackController
+      ? null
+      : _playback as PlaybackController;
+
+  String get _currentId => _document?.sourcePath ?? _audio!.sourcePath;
+
+  String get _headerTitle {
+    final document = _document;
+    if (document != null) {
+      return widget.useInternalTitles
+          ? (document.title.isEmpty
+                ? scoreDisplayName(document.fileName)
+                : document.title)
+          : scoreDisplayName(document.fileName);
+    }
+    return _audio!.displayTitle(useInternalTitles: widget.useInternalTitles);
+  }
+
   @override
   void initState() {
     super.initState();
     _document = widget.document;
-    _playback = PlaybackController(_document)..addListener(_onPlaybackChanged);
+    _audio = widget.audio;
+    _playback = _createPlayback()..addListener(_onPlaybackChanged);
     widget.queue
-      ?..setCurrentId(_document.sourcePath)
+      ?..setCurrentId(_currentId)
       ..addListener(_onQueueChanged);
     MediaCommands.onPauseRequested = _pauseFromPlatform;
+    MediaCommands.onMediaCompleted = _mediaCompleted;
     if (widget.autoplay) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_play());
@@ -65,10 +104,29 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
+  PlaybackHandle _createPlayback() {
+    final document = _document;
+    if (document != null) {
+      return PlaybackController(document);
+    }
+    final audio = _audio!;
+    return AudioPlaybackController(
+      audio.sourcePath,
+      durationUs: audio.durationUs,
+    );
+  }
+
   /// Stop action of the playback notification: pause this reader.
   Future<void> _pauseFromPlatform() async {
     if (!mounted) return;
     await _playback.pause();
+  }
+
+  /// The platform media player reached the end of the current audio file.
+  void _mediaCompleted() {
+    if (!mounted) return;
+    final playback = _playback;
+    if (playback is AudioPlaybackController) playback.handleCompleted();
   }
 
   void _onQueueChanged() {
@@ -87,21 +145,28 @@ class _ReaderPageState extends State<ReaderPage> {
     if (!wasPlaying && _playback.isPlaying) {
       widget.queue?.recordCurrent();
     }
-    final cursor = _playback.cursorPosition;
-    final page = cursor?.pageIndex ?? _playback.currentPage;
-    final pageChanged = page != _visiblePage;
-    if (pageChanged &&
-        (_playback.isPlaying || _playback.cursorVisible) &&
-        _document.pages.isNotEmpty) {
-      _visiblePage = page;
-    }
-    if (cursor != null && _playback.cursorVisible) {
-      _scoreViewportKey.currentState?.followCursor(
-        cursor,
-        animate: _playback.isPlaying && !_reduceMotion,
-      );
-    } else if (pageChanged && _playback.cursorVisible) {
-      _scoreViewportKey.currentState?.focusPage(page, animate: !_reduceMotion);
+    final scorePlayback = _scorePlayback;
+    final document = _document;
+    if (scorePlayback != null && document != null) {
+      final cursor = scorePlayback.cursorPosition;
+      final page = cursor?.pageIndex ?? scorePlayback.currentPage;
+      final pageChanged = page != _visiblePage;
+      if (pageChanged &&
+          (scorePlayback.isPlaying || scorePlayback.cursorVisible) &&
+          document.pages.isNotEmpty) {
+        _visiblePage = page;
+      }
+      if (cursor != null && scorePlayback.cursorVisible) {
+        _scoreViewportKey.currentState?.followCursor(
+          cursor,
+          animate: scorePlayback.isPlaying && !_reduceMotion,
+        );
+      } else if (pageChanged && scorePlayback.cursorVisible) {
+        _scoreViewportKey.currentState?.focusPage(
+          page,
+          animate: !_reduceMotion,
+        );
+      }
     }
     // A piece ended when playback stopped itself at the end of the document.
     // The controller has no end callback, so infer it from the transition
@@ -121,6 +186,9 @@ class _ReaderPageState extends State<ReaderPage> {
   void dispose() {
     if (MediaCommands.onPauseRequested == _pauseFromPlatform) {
       MediaCommands.onPauseRequested = null;
+    }
+    if (MediaCommands.onMediaCompleted == _mediaCompleted) {
+      MediaCommands.onMediaCompleted = null;
     }
     widget.queue?.removeListener(_onQueueChanged);
     _playback.dispose();
@@ -195,8 +263,8 @@ class _ReaderPageState extends State<ReaderPage> {
   Future<void> _switchToPiece(String id, {required bool autoplay}) async {
     final queue = widget.queue;
     if (queue == null) return;
-    if (id == _document.sourcePath) {
-      // Same document (single-loop replay or restart): no load needed.
+    if (id == _currentId) {
+      // Same piece (single-loop replay or restart): no load needed.
       await _playback.restart();
       if (autoplay) await _play();
       return;
@@ -212,18 +280,28 @@ class _ReaderPageState extends State<ReaderPage> {
       hydrated = null;
     }
     if (!mounted) return;
-    final document = hydrated?.document;
-    if (document == null) {
+    final entry = hydrated;
+    final document = entry?.document;
+    final isAudioEntry = entry?.isAudio == true;
+    if (entry == null || (document == null && !isAudioEntry)) {
       setState(() => _switching = false);
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(content: Text('打开谱面失败')));
+        ..showSnackBar(
+          SnackBar(content: Text(isAudioEntry ? '打开音频失败' : '打开谱面失败')),
+        );
       return;
     }
     _playback.dispose();
-    _document = document;
+    if (isAudioEntry) {
+      _document = null;
+      _audio = AudioItem.fromEntry(entry);
+    } else {
+      _document = document;
+      _audio = null;
+    }
     queue.setCurrentId(id);
-    _playback = PlaybackController(_document)..addListener(_onPlaybackChanged);
+    _playback = _createPlayback()..addListener(_onPlaybackChanged);
     _scoreViewportKey = GlobalKey<_MultiPageScoreViewportState>();
     _visiblePage = 0;
     _wasPlaying = false;
@@ -238,8 +316,9 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   Future<void> _changePage(int page) async {
-    if (_document.pages.isEmpty) return;
-    final next = page.clamp(0, _document.pages.length - 1).toInt();
+    final document = _document;
+    if (document == null || document.pages.isEmpty) return;
+    final next = page.clamp(0, document.pages.length - 1).toInt();
     _visiblePage = next;
     _scoreViewportKey.currentState?.focusPage(next, animate: !_reduceMotion);
     if (!mounted) return;
@@ -258,8 +337,9 @@ class _ReaderPageState extends State<ReaderPage> {
     // MuseScore only treats score clicks specially while ViewState::PLAY is
     // active.  Pausing/stopping returns the desktop view to NORMAL, so a
     // reader tap outside active playback must remain inert as well.
-    if (!_playback.isPlaying || _switching) return;
-    final target = _document.playbackTimeAtPagePosition(
+    final document = _document;
+    if (document == null || !_playback.isPlaying || _switching) return;
+    final target = document.playbackTimeAtPagePosition(
       pageIndex,
       pagePosition.dx,
       pagePosition.dy,
@@ -272,8 +352,9 @@ class _ReaderPageState extends State<ReaderPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final active = _playback.activeEventIndexes.toSet();
+    final active = _scorePlayback?.activeEventIndexes.toSet() ?? const <int>{};
     final queue = widget.queue;
+    final document = _document;
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -282,17 +363,18 @@ class _ReaderPageState extends State<ReaderPage> {
           tooltip: '返回谱面库',
         ),
         title: Text(
-          _document.title,
+          _headerTitle,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: theme.textTheme.titleMedium,
         ),
         actions: [
-          IconButton(
-            onPressed: () => _scoreViewportKey.currentState?.resetView(),
-            icon: const Icon(Icons.fit_screen_outlined),
-            tooltip: '适应页面',
-          ),
+          if (document != null)
+            IconButton(
+              onPressed: () => _scoreViewportKey.currentState?.resetView(),
+              icon: const Icon(Icons.fit_screen_outlined),
+              tooltip: '适应页面',
+            ),
           const SizedBox(width: 8),
         ],
       ),
@@ -304,18 +386,26 @@ class _ReaderPageState extends State<ReaderPage> {
                 Positioned.fill(
                   child: ColoredBox(
                     color: theme.colorScheme.surfaceContainerHigh,
-                    child: _MultiPageScoreViewport(
-                      key: _scoreViewportKey,
-                      document: _document,
-                      activeEventIndexes: active,
-                      playbackCursor: _playback.cursorPosition,
-                      onPageTap: _onScorePageTap,
-                      onPageChanged: (page) {
-                        if (page != _visiblePage && mounted) {
-                          setState(() => _visiblePage = page);
-                        }
-                      },
-                    ),
+                    child: document != null
+                        ? _MultiPageScoreViewport(
+                            key: _scoreViewportKey,
+                            document: document,
+                            activeEventIndexes: active,
+                            playbackCursor: _scorePlayback?.cursorPosition,
+                            onPageTap: _onScorePageTap,
+                            onPageChanged: (page) {
+                              if (page != _visiblePage && mounted) {
+                                setState(() => _visiblePage = page);
+                              }
+                            },
+                          )
+                        : _AudioPanel(
+                            item: _audio!,
+                            useInternalTitles: widget.useInternalTitles,
+                            error: _playback is AudioPlaybackController
+                                ? (_playback as AudioPlaybackController).error
+                                : null,
+                          ),
                   ),
                 ),
                 if (_switching)
@@ -342,7 +432,7 @@ class _ReaderPageState extends State<ReaderPage> {
                                 ),
                                 const SizedBox(width: 14),
                                 Text(
-                                  '正在载入谱面…',
+                                  document != null ? '正在载入谱面…' : '正在载入音频…',
                                   style: theme.textTheme.bodyMedium,
                                 ),
                               ],
@@ -367,7 +457,7 @@ class _ReaderPageState extends State<ReaderPage> {
           _TransportBar(
             playback: _playback,
             page: _visiblePage,
-            pageCount: _document.pages.length,
+            pageCount: document?.pages.length,
             onPageChanged: _changePage,
           ),
         ],
@@ -1335,6 +1425,71 @@ class _PieceSwitcherBar extends StatelessWidget {
   }
 }
 
+/// Placeholder shown while an audio file plays: there is no engraving to
+/// display, so the panel names the item and the bottom transport does the work.
+class _AudioPanel extends StatelessWidget {
+  const _AudioPanel({
+    required this.item,
+    required this.useInternalTitles,
+    this.error,
+  });
+
+  final AudioItem item;
+  final bool useInternalTitles;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final author = item.displayAuthor(useInternalTitles: useInternalTitles);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.audiotrack_rounded,
+              size: 64,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(height: 18),
+            Text(
+              item.displayTitle(useInternalTitles: useInternalTitles),
+              textAlign: TextAlign.center,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.titleLarge,
+            ),
+            if (author.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                author,
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+            const SizedBox(height: 18),
+            Text(
+              error ?? '音频文件（无谱面）',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: error == null
+                    ? theme.colorScheme.onSurfaceVariant
+                    : theme.colorScheme.error,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _TransportBar extends StatelessWidget {
   const _TransportBar({
     required this.playback,
@@ -1343,9 +1498,9 @@ class _TransportBar extends StatelessWidget {
     required this.onPageChanged,
   });
 
-  final PlaybackController playback;
-  final int page;
-  final int pageCount;
+  final PlaybackHandle playback;
+  final int page; // only used by the score page navigator
+  final int? pageCount; // null for audio items: no page navigator
   final Future<void> Function(int page) onPageChanged;
 
   @override
@@ -1417,11 +1572,13 @@ class _TransportBar extends StatelessWidget {
                     ),
                   ),
                 );
-                final pageControls = _PageNavigator(
-                  page: page,
-                  pageCount: pageCount,
-                  onPageChanged: onPageChanged,
-                );
+                final pageControls = pageCount == null
+                    ? null
+                    : _PageNavigator(
+                        page: page,
+                        pageCount: pageCount!,
+                        onPageChanged: onPageChanged,
+                      );
                 return LayoutBuilder(
                   builder: (context, constraints) {
                     final textScale =
@@ -1438,8 +1595,10 @@ class _TransportBar extends StatelessWidget {
                           playbackTime,
                           const SizedBox(width: 8),
                           Expanded(child: timeline),
-                          const SizedBox(width: 16),
-                          pageControls,
+                          if (pageControls != null) ...[
+                            const SizedBox(width: 16),
+                            pageControls,
+                          ],
                         ],
                       );
                     }
@@ -1466,16 +1625,20 @@ class _TransportBar extends StatelessWidget {
                               playButton,
                             ],
                           ),
-                          const SizedBox(height: 4),
-                          pageControls,
+                          if (pageControls != null) ...[
+                            const SizedBox(height: 4),
+                            pageControls,
+                          ],
                         ] else
                           Row(
                             children: [
                               restartButton,
                               const SizedBox(width: 8),
                               playButton,
-                              const Spacer(),
-                              pageControls,
+                              if (pageControls != null) ...[
+                                const Spacer(),
+                                pageControls,
+                              ],
                             ],
                           ),
                       ],

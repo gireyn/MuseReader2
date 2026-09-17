@@ -79,12 +79,83 @@ class ScoreLibraryEntry {
   final String? assetPath;
 
   bool get isBundled => assetPath != null;
+
+  /// True for an audio file played by the platform media player instead of an
+  /// engraved MuseScore document.
+  bool get isAudio => format == ScoreFormat.audio;
+
+  /// Copy carrying metadata read from an audio file's tags (ID3/Vorbis/MP4).
+  ScoreLibraryEntry withAudioMetadata({
+    String? title,
+    String? artist,
+    int? durationUs,
+  }) {
+    return ScoreLibraryEntry(
+      sourcePath: sourcePath,
+      fileName: fileName,
+      format: format,
+      title: title == null || title.isEmpty ? this.title : title,
+      composer: artist == null || artist.isEmpty ? composer : artist,
+      pageCount: pageCount,
+      durationUs: durationUs ?? this.durationUs,
+      coverBytes: coverBytes,
+      document: document,
+      assetPath: assetPath,
+    );
+  }
 }
 
 String scoreFileName(String path) => path.replaceAll('\\', '/').split('/').last;
 
-ScoreFormat scoreFormatForPath(String path) =>
-    path.toLowerCase().endsWith('.mscz') ? ScoreFormat.mscz : ScoreFormat.mscx;
+/// Audio containers handed to the platform media player. Anything the device
+/// cannot decode reports a load error instead of crashing.
+const audioFileExtensions = <String>{
+  'mp3',
+  'wav',
+  'wave',
+  'ogg',
+  'oga',
+  'opus',
+  'flac',
+  'm4a',
+  'aac',
+  'mp4',
+  'm4b',
+  'wma',
+  'aif',
+  'aiff',
+  'amr',
+  '3gp',
+};
+
+String fileExtension(String path) {
+  final normalized = path.toLowerCase();
+  final slash = normalized.lastIndexOf('/');
+  final dot = normalized.lastIndexOf('.');
+  return dot > slash && dot >= 0 ? normalized.substring(dot + 1) : '';
+}
+
+bool isScorePath(String path) {
+  final extension = fileExtension(path);
+  return extension == 'mscx' || extension == 'mscz';
+}
+
+bool isAudioPath(String path) =>
+    audioFileExtensions.contains(fileExtension(path));
+
+/// Every file kind the library accepts (MuseScore scores and audio files).
+bool isSupportedMediaPath(String path) =>
+    isScorePath(path) || isAudioPath(path);
+
+ScoreFormat scoreFormatForPath(String path) {
+  final extension = fileExtension(path);
+  if (extension == 'mscz') return ScoreFormat.mscz;
+  if (extension == 'mscx') return ScoreFormat.mscx;
+  return isAudioPath(path) ? ScoreFormat.audio : ScoreFormat.mscx;
+}
+
+/// Uppercase badge for a library card ("MSCZ", "MP3", …).
+String mediaFormatLabel(String path) => fileExtension(path).toUpperCase();
 
 String scoreDisplayName(String fileName) {
   final extensionIndex = fileName.lastIndexOf('.');
@@ -94,3 +165,21 @@ String scoreDisplayName(String fileName) {
   final withoutImportPrefix = stem.replaceFirst(RegExp(r'^\d+(?:_\d+)?_'), '');
   return withoutImportPrefix.isEmpty ? stem : withoutImportPrefix;
 }
+
+/// Title for a library card or the reader header. With [useInternalTitles] the
+/// file's own metadata is used; otherwise the file name (importer prefix and
+/// extension stripped).
+String libraryDisplayTitle(
+  ScoreLibraryEntry entry, {
+  required bool useInternalTitles,
+}) {
+  if (useInternalTitles && entry.title.isNotEmpty) return entry.title;
+  return scoreDisplayName(entry.fileName);
+}
+
+/// Author line for a library card; empty when internal titles are off (the
+/// author is hidden in that mode).
+String libraryDisplayAuthor(
+  ScoreLibraryEntry entry, {
+  required bool useInternalTitles,
+}) => useInternalTitles ? entry.composer : '';

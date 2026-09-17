@@ -43,10 +43,7 @@ void main() {
 
     expect(find.byType(SliverGrid), findsOneWidget);
     expect(find.text('1 份谱面'), findsOneWidget);
-    expect(
-      find.bySemanticsLabel(RegExp('打开谱面 MuseReader Demo')),
-      findsOneWidget,
-    );
+    expect(find.bySemanticsLabel(RegExp('打开 reader-demo')), findsOneWidget);
 
     final importButton = find.widgetWithText(FilledButton, '导入谱面');
     expect(tester.getSize(importButton).height, greaterThanOrEqualTo(48));

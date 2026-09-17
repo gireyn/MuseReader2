@@ -88,7 +88,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(openCalls, 1);
-    expect(find.text('Persisted score'), findsOneWidget);
+    // 内部标题 is off by default, so the hydrated card keeps showing the file
+    // name (the author line is hidden).
+    expect(find.text('persisted'), findsOneWidget);
+    expect(find.text('MuseReader'), findsOneWidget); // app bar title only
   });
 
   test('filters non-score files returned by the platform', () async {
@@ -96,6 +99,9 @@ void main() {
       expect(call.method, 'listImportedScoreFiles');
       return [
         '/data/user/0/icu.ringona.musereader/files/score.MSCX',
+        '/data/user/0/icu.ringona.musereader/files/song.MP3',
+        '/data/user/0/icu.ringona.musereader/files/tune.flac',
+        '/data/user/0/icu.ringona.musereader/files/voice.m4a',
         '/data/user/0/icu.ringona.musereader/files/notes.txt',
         42,
       ];
@@ -103,6 +109,9 @@ void main() {
 
     expect(await FilePickerService().listImportedScoreFiles(), [
       '/data/user/0/icu.ringona.musereader/files/score.MSCX',
+      '/data/user/0/icu.ringona.musereader/files/song.MP3',
+      '/data/user/0/icu.ringona.musereader/files/tune.flac',
+      '/data/user/0/icu.ringona.musereader/files/voice.m4a',
     ]);
   });
 }

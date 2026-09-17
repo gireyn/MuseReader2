@@ -132,7 +132,7 @@ void main() {
       documents: {pathA: _doc(pathA, 'alpha')},
     );
 
-    expect(find.text('MuseReader Demo'), findsNothing);
+    expect(find.text('reader-demo'), findsNothing);
     expect(find.text('alpha'), findsOneWidget);
     expect(find.text('开始随机'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -143,7 +143,7 @@ void main() {
   ) async {
     await pumpLibrary(tester, importedPaths: const [], documents: const {});
 
-    expect(find.text('MuseReader Demo'), findsOneWidget);
+    expect(find.text('reader-demo'), findsOneWidget);
     expect(find.text('开始随机'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

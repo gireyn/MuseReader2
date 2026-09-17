@@ -4,8 +4,9 @@ import 'package:flutter/foundation.dart';
 
 import '../model/score_document.dart';
 import '../services/muse_score_bridge.dart';
+import 'playback_handle.dart';
 
-class PlaybackController extends ChangeNotifier {
+class PlaybackController extends ChangeNotifier implements PlaybackHandle {
   PlaybackController(this.document);
 
   final ScoreDocument document;
@@ -20,10 +21,12 @@ class PlaybackController extends ChangeNotifier {
   bool _audioPositionQueryInFlight = false;
   int _playbackGeneration = 0;
 
+  @override
   bool get isPlaying => _isPlaying;
   double get speed => _speed;
   bool get cursorVisible => _cursorVisible;
 
+  @override
   int get positionUs {
     if (!_isPlaying || _clock == null) return _positionUs;
     final audioPosition = _audioPositionUs;
@@ -42,8 +45,10 @@ class PlaybackController extends ChangeNotifier {
   ScoreCursorPosition? get cursorPosition =>
       _cursorVisible ? document.cursorForTime(positionUs) : null;
 
+  @override
   int get durationUs => document.durationUs;
 
+  @override
   double get progress => durationUs == 0 ? 0 : positionUs / durationUs;
 
   int get currentPage =>
@@ -76,6 +81,7 @@ class PlaybackController extends ChangeNotifier {
     return indexes;
   }
 
+  @override
   Future<void> play() async {
     if (durationUs <= 0) return;
     if (positionUs >= durationUs) {
@@ -103,6 +109,7 @@ class PlaybackController extends ChangeNotifier {
     await _syncPosition(generation);
   }
 
+  @override
   Future<void> pause() async {
     if (!_isPlaying) return;
     await _syncPosition();
@@ -120,8 +127,10 @@ class PlaybackController extends ChangeNotifier {
     notifyListeners();
   }
 
+  @override
   Future<void> toggle() => _isPlaying ? pause() : play();
 
+  @override
   Future<void> restart() async {
     await pause();
     _positionUs = 0;
@@ -129,6 +138,7 @@ class PlaybackController extends ChangeNotifier {
     notifyListeners();
   }
 
+  @override
   Future<void> seekToUs(int microseconds) async {
     final next = microseconds.clamp(0, durationUs).toInt();
     _positionUs = next;

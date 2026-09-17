@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-enum ScoreFormat { mscx, mscz }
+enum ScoreFormat { mscx, mscz, audio }
 
 enum GlyphKind {
   title,

@@ -51,7 +51,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // First run: only the bundled demo, with both import actions available.
-    expect(find.text('MuseReader Demo'), findsOneWidget);
+    expect(find.text('reader-demo'), findsOneWidget);
     expect(find.text('导入谱面'), findsOneWidget);
     expect(find.text('打开目录'), findsOneWidget);
 
@@ -65,7 +65,7 @@ void main() {
 
     // The collection is replaced by the folder's scores; the demo is gone.
     expect(imported, hasLength(2));
-    expect(find.text('MuseReader Demo'), findsNothing);
+    expect(find.text('reader-demo'), findsNothing);
     expect(find.text('alpha'), findsOneWidget);
     expect(find.text('beta'), findsOneWidget);
     expect(find.text('2 份谱面'), findsOneWidget);
