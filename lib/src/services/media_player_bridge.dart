@@ -86,6 +86,20 @@ class MediaPlayerBridge {
     }
   }
 
+  /// Whether the device screen is currently interactive (Android). Platforms
+  /// without the query report `true`, so the queue keeps advancing as before.
+  static Future<bool> screenIsOn() async {
+    try {
+      return await _channel.invokeMethod<bool>('isInteractive') ?? true;
+    } on MissingPluginException {
+      return true;
+    } on PlatformException {
+      return true;
+    } on Object {
+      return true;
+    }
+  }
+
   static Future<bool> isPlaying() async {
     try {
       return await _channel.invokeMethod<bool>('isPlaying') ?? false;

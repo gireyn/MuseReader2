@@ -86,7 +86,7 @@ void main() {
       tester,
       imports: const [pathA],
       documents: {pathA: fakeScoreDocument(pathA, 'Alpha Title')},
-      storedBooleanPreference: true,
+      storedPreferences: const {'use_internal_titles': true},
     );
 
     expect(find.text('Alpha Title'), findsOneWidget);

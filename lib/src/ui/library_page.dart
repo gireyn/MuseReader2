@@ -9,11 +9,14 @@ import '../playback/playback_controller.dart';
 import '../playback/score_queue.dart';
 import '../services/file_picker_service.dart';
 import '../services/media_commands.dart';
+import '../services/score_metadata_reader.dart';
+import '../services/loading_priority.dart';
 import '../services/score_library_cache.dart';
 import '../services/score_repository.dart';
 import 'folder_picker_page.dart';
 import 'reader_page.dart';
 import 'score_page_painter.dart';
+import 'toggle_button.dart';
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({super.key, this.repository, this.libraryCache});
@@ -55,6 +58,27 @@ class _LibraryPageState extends State<LibraryPage> {
   /// 内部标题: when false (the default) cards and the reader header show the
   /// file name without extension and hide the author.
   bool _useInternalTitles = false;
+  bool _displayPreferenceTouched = false;
+
+  final _metadataReader = ScoreMetadataReader();
+
+  /// Bumped whenever the collection changes so background passes stop.
+  int _backgroundGeneration = 0;
+
+  /// Scores whose cover generation was already attempted this session.
+  final _coverGenerationAttempted = <String>{};
+
+  /// Cancellable inter-item delay for the background passes.
+  Timer? _backgroundThrottle;
+
+  /// 开始随机 is preparing a score: show the same loading card as a piece switch.
+  bool _randomLoading = false;
+
+  /// The last card the sliver builders reported in the current frame: the
+  /// bottom-most card on screen, used as the loading anchor.
+  String? _anchorPath;
+  final _frameReported = <String>[];
+  bool _anchorCommitScheduled = false;
 
   ReaderQueue? _queue;
   bool _loading = true;
@@ -72,24 +96,91 @@ class _LibraryPageState extends State<LibraryPage> {
 
   Future<void> _restoreDisplayPreferences() async {
     final stored = await _picker.readBooleanPreference(_useInternalTitlesKey);
-    if (!mounted || stored == _useInternalTitles) return;
-    setState(() => _useInternalTitles = stored);
+    // A slow platform read must never override a choice the user just made.
+    if (!mounted || _displayPreferenceTouched) return;
+    if (stored != _useInternalTitles) {
+      setState(() => _useInternalTitles = stored);
+    }
   }
+
+  /// Called for every card the sliver builders materialise, in index order.
+  void _noteVisibleCard(String sourcePath) {
+    _frameReported.add(sourcePath);
+    if (_anchorCommitScheduled) return;
+    _anchorCommitScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _anchorCommitScheduled = false;
+      if (!mounted || _frameReported.isEmpty) return;
+      final anchor = _frameReported.last;
+      _frameReported.clear();
+      if (anchor != _anchorPath) _anchorPath = anchor;
+    });
+  }
+
+  /// Next background-work candidate: from the bottom-most card of the viewport
+  /// backwards to the top of the collection, then forwards below the anchor.
+  String? _nextPendingPath(bool Function(ScoreLibraryEntry entry) eligible) {
+    final order = anchorFirstOrder(
+      anchorPath: _anchorPath,
+      collectionOrder: [for (final entry in _entries) entry.sourcePath],
+    );
+    for (final path in order) {
+      final index = _entries.indexWhere((entry) => entry.sourcePath == path);
+      if (index >= 0 && eligible(_entries[index])) {
+        debugPrint(
+          '[MuseReader] loading ${scoreFileName(path)} '
+          '(anchor ${_anchorPath == null ? '-' : scoreFileName(_anchorPath!)})',
+        );
+        return path;
+      }
+    }
+    return null;
+  }
+
+  bool _needsScoreMetadata(ScoreLibraryEntry entry) =>
+      !entry.isAudio &&
+      !entry.isBundled &&
+      entry.document == null &&
+      !(entry.title.isNotEmpty &&
+          entry.title != scoreDisplayName(entry.fileName));
+
+  bool _needsCover(ScoreLibraryEntry entry) =>
+      !entry.isAudio &&
+      !entry.isBundled &&
+      entry.document == null &&
+      entry.coverBytes == null &&
+      !_coverGenerationAttempted.contains(entry.sourcePath) &&
+      !_openingPaths.contains(entry.sourcePath);
 
   void _setUseInternalTitles(bool value) {
     if (_useInternalTitles == value) return;
+    _displayPreferenceTouched = true;
     setState(() => _useInternalTitles = value);
     unawaited(_picker.writeBooleanPreference(_useInternalTitlesKey, value));
   }
 
   @override
   void dispose() {
+    _backgroundGeneration += 1;
+    _backgroundThrottle?.cancel();
+    _backgroundThrottle = null;
     if (MediaCommands.onMemoryPressure == _handleMemoryPressure) {
       MediaCommands.onMemoryPressure = null;
     }
     MediaCommands.detach();
     _queue?.dispose();
     super.dispose();
+  }
+
+  /// Cancellable delay used between background items: dispose() cancels it so
+  /// no timer outlives the page (and widget tests stay clean).
+  Future<void> _throttleBackground(Duration duration) {
+    final completer = Completer<void>();
+    _backgroundThrottle?.cancel();
+    _backgroundThrottle = Timer(duration, () {
+      if (!completer.isCompleted) completer.complete();
+    });
+    return completer.future;
   }
 
   /// Android reports memory pressure through `Activity.onTrimMemory`.
@@ -138,11 +229,11 @@ class _LibraryPageState extends State<LibraryPage> {
         ..clear()
         ..addAll(placeholders);
       _retentionOrder.clear();
+      _anchorPath = null;
       _loading = false;
       _error = firstError;
     });
     _syncQueue();
-    unawaited(_applyAudioMetadata(uniquePaths));
 
     // Metadata and thumbnail sidecars are small and can hydrate after the
     // first usable library frame. Full MuseScore documents are loaded only
@@ -165,9 +256,9 @@ class _LibraryPageState extends State<LibraryPage> {
         }
       }
     });
-    // Tags/durations are read from the platform after the cache phase so they
+    // Titles/covers are filled in the background after the cache phase so they
     // are not overwritten by it.
-    await _applyAudioMetadata(uniquePaths);
+    _startBackgroundLibraryPasses(uniquePaths);
   }
 
   Future<void> _reloadLibrary() async {
@@ -204,7 +295,7 @@ class _LibraryPageState extends State<LibraryPage> {
       _error = null;
     });
     _syncQueue();
-    if (entry.isAudio) unawaited(_applyAudioMetadata([path]));
+    _startBackgroundLibraryPasses([path]);
     await _openEntry(entry);
   }
 
@@ -229,6 +320,7 @@ class _LibraryPageState extends State<LibraryPage> {
         ..clear()
         ..addAll(placeholders);
       _retentionOrder.clear();
+      _anchorPath = null;
       _loading = false;
       _error = null;
     });
@@ -255,19 +347,21 @@ class _LibraryPageState extends State<LibraryPage> {
         }
       }
     });
-    await _applyAudioMetadata(uniquePaths);
+    _startBackgroundLibraryPasses(uniquePaths);
   }
 
   /// Reads embedded audio tags (title/artist) and durations for the audio
   /// files of the collection; scores are untouched.
-  Future<void> _applyAudioMetadata(List<String> paths) async {
+  Future<void> _applyAudioMetadata(List<String> paths, int generation) async {
     final audioPaths = [
       for (final path in paths)
         if (isAudioPath(path)) path,
     ];
     if (audioPaths.isEmpty) return;
     final metadata = await _picker.readAudioMetadata(audioPaths);
-    if (!mounted || metadata.isEmpty) return;
+    if (!mounted || metadata.isEmpty || generation != _backgroundGeneration) {
+      return;
+    }
     final byPath = <String, Map<dynamic, dynamic>>{
       for (final item in metadata)
         if (item['path'] is String) item['path'] as String: item,
@@ -279,15 +373,101 @@ class _LibraryPageState extends State<LibraryPage> {
         final info = byPath[entry.sourcePath];
         if (info == null) continue;
         final durationMs = info['durationMs'];
-        _entries[index] = entry.withAudioMetadata(
+        _entries[index] = entry.withMetadata(
           title: info['title'] as String?,
-          artist: info['artist'] as String?,
+          composer: info['artist'] as String?,
           durationUs: durationMs is num
               ? (durationMs.toDouble() * 1000).round()
               : null,
         );
       }
     });
+  }
+
+  /// Background passes started after a collection is (re)loaded:
+  ///  1. titles/authors for audio files (tags) and for scores that were never
+  ///     opened (a cheap MSCX/MSCZ metadata read — no engraving);
+  ///  2. cover/document pre-generation: each score is rendered once so the
+  ///     library gets thumbnails and the first open is instant. It runs one
+  ///     score at a time, pauses while a reader session is displayed, and stops
+  ///     when the collection changes.
+  void _startBackgroundLibraryPasses(List<String> paths) {
+    final generation = ++_backgroundGeneration;
+    unawaited(_applyAudioMetadata(paths, generation));
+    unawaited(_applyScoreMetadata(paths, generation));
+    unawaited(_pregenerateCovers(generation));
+  }
+
+  /// Reads title/composer straight from the file for scores without metadata.
+  /// Visible cards are handled first; the item being read is never interrupted.
+  Future<void> _applyScoreMetadata(List<String> paths, int generation) async {
+    // Paths outside the current collection are ignored by the lookup.
+    final pending = <String>{...paths};
+    var firstPick = true;
+    while (true) {
+      if (!mounted || generation != _backgroundGeneration) return;
+      if (firstPick) {
+        // Let the list lay out first so the very first pick is the top-most
+        // visible card rather than entry #1.
+        firstPick = false;
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted || generation != _backgroundGeneration) return;
+      }
+      final path = _nextPendingPath(
+        (entry) =>
+            pending.contains(entry.sourcePath) && _needsScoreMetadata(entry),
+      );
+      if (path == null) return;
+      pending.remove(path);
+      final metadata = await _metadataReader.read(path);
+      if (!mounted || generation != _backgroundGeneration) return;
+      if (metadata.isEmpty) continue;
+      final target = _entries.indexWhere((item) => item.sourcePath == path);
+      if (target < 0) continue;
+      setState(() {
+        _entries[target] = _entries[target].withMetadata(
+          title: metadata.title,
+          composer: metadata.composer,
+        );
+      });
+      await _throttleBackground(const Duration(milliseconds: 2));
+    }
+  }
+
+  /// Renders every score that has no thumbnail yet, one at a time. Visible
+  /// cards are picked first; the score being rendered always finishes, then the
+  /// pass jumps to whatever the user is looking at.
+  Future<void> _pregenerateCovers(int generation) async {
+    var firstPick = true;
+    while (true) {
+      if (!mounted || generation != _backgroundGeneration) return;
+      if (firstPick) {
+        firstPick = false;
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted || generation != _backgroundGeneration) return;
+      }
+      final path = _nextPendingPath(_needsCover);
+      if (path == null) return;
+      // Give way while the reader page is on top: never disturb playback.
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        await _throttleBackground(const Duration(milliseconds: 400));
+        continue;
+      }
+      _coverGenerationAttempted.add(path);
+      try {
+        final document = await _repository.open(path);
+        final hydrated = await _libraryCache.write(document);
+        if (!mounted || generation != _backgroundGeneration) return;
+        setState(() {
+          final target = _entries.indexWhere((item) => item.sourcePath == path);
+          // Keep the metadata and the cover, release the rendered document.
+          if (target >= 0) _entries[target] = _demotedCopy(hydrated);
+        });
+      } on Object {
+        // A score that cannot be rendered keeps its placeholder card.
+      }
+      await _throttleBackground(const Duration(milliseconds: 250));
+    }
   }
 
   /// Open a score card: hydrate the document when needed, then push the
@@ -416,15 +596,20 @@ class _LibraryPageState extends State<LibraryPage> {
         ? ids.first
         : (queue.memory.chooseNext(ids) ?? ids.first);
     queue.setCurrentId(chosen);
+    setState(() => _randomLoading = true);
     try {
       final hydrated = await _loadEntryById(chosen);
       if (!mounted) return;
       if (hydrated.document == null && !hydrated.isAudio) return;
+      setState(() => _randomLoading = false);
       _openReader(hydrated, autoplay: true);
     } catch (error) {
       if (!mounted) return;
+      setState(() {
+        _randomLoading = false;
+        _error = '$error';
+      });
       _showMessage('打开谱面失败');
-      setState(() => _error = '$error');
     }
   }
 
@@ -507,85 +692,144 @@ class _LibraryPageState extends State<LibraryPage> {
         title: const Text('MuseReader'),
         titleSpacing: appBarInset,
       ),
-      body: SafeArea(
-        top: false,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final width = constraints.maxWidth;
-            final horizontal = _libraryHorizontalInset(width);
-            final contentWidth = width - horizontal * 2;
-            final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
-            final columns = contentWidth >= 760 && textScale <= 1.25 ? 2 : 1;
-            return CustomScrollView(
-              key: const PageStorageKey<String>('score-library-scroll'),
-              slivers: [
-                SliverPadding(
-                  padding: EdgeInsets.fromLTRB(horizontal, 24, horizontal, 20),
-                  sliver: SliverToBoxAdapter(
-                    child: _LibraryHeader(
-                      onImport: _loading ? null : _importScore,
-                      onOpenFolder: _loading ? null : _importFolder,
-                      documentCount: _entries.length,
-                      loading: _loading,
-                      useInternalTitles: _useInternalTitles,
-                      onToggleInternalTitles: _setUseInternalTitles,
-                    ),
-                  ),
-                ),
-                if (_loading)
-                  SliverPadding(
-                    padding: EdgeInsets.fromLTRB(horizontal, 0, horizontal, 16),
-                    sliver: const SliverToBoxAdapter(
-                      child: LinearProgressIndicator(minHeight: 2),
-                    ),
-                  ),
-                if (_error != null)
-                  SliverPadding(
-                    padding: EdgeInsets.fromLTRB(horizontal, 0, horizontal, 16),
-                    sliver: SliverToBoxAdapter(
-                      child: _ErrorStrip(
-                        message: _error!,
-                        onRetry: _reloadLibrary,
-                        onDismiss: _dismissError,
+      body: Stack(
+        children: [
+          SafeArea(
+            top: false,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                final horizontal = _libraryHorizontalInset(width);
+                final contentWidth = width - horizontal * 2;
+                final textScale =
+                    MediaQuery.textScalerOf(context).scale(14) / 14;
+                final columns = contentWidth >= 760 && textScale <= 1.25
+                    ? 2
+                    : 1;
+                return CustomScrollView(
+                  key: const PageStorageKey<String>('score-library-scroll'),
+                  slivers: [
+                    SliverPadding(
+                      padding: EdgeInsets.fromLTRB(
+                        horizontal,
+                        24,
+                        horizontal,
+                        20,
+                      ),
+                      sliver: SliverToBoxAdapter(
+                        child: _LibraryHeader(
+                          onImport: _loading ? null : _importScore,
+                          onOpenFolder: _loading ? null : _importFolder,
+                          documentCount: _entries.length,
+                          loading: _loading,
+                          useInternalTitles: _useInternalTitles,
+                          onToggleInternalTitles: _setUseInternalTitles,
+                        ),
                       ),
                     ),
-                  ),
-                if (_loading)
-                  _LibraryItems(
-                    horizontalPadding: horizontal,
-                    columns: columns,
-                    loading: true,
-                    entries: const [],
-                    openingPaths: const {},
-                    onOpen: _openEntry,
-                    useInternalTitles: _useInternalTitles,
-                  )
-                else if (_entries.isEmpty)
-                  SliverFillRemaining(
-                    hasScrollBody: false,
-                    child: _EmptyLibrary(
-                      onImport: _importScore,
-                      onOpenFolder: _importFolder,
-                    ),
-                  )
-                else
-                  _LibraryItems(
-                    horizontalPadding: horizontal,
-                    columns: columns,
-                    loading: false,
-                    entries: _entries,
-                    openingPaths: _openingPaths,
-                    onOpen: _openEntry,
-                    useInternalTitles: _useInternalTitles,
-                  ),
-              ],
-            );
-          },
-        ),
+                    if (_loading)
+                      SliverPadding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontal,
+                          0,
+                          horizontal,
+                          16,
+                        ),
+                        sliver: const SliverToBoxAdapter(
+                          child: LinearProgressIndicator(minHeight: 2),
+                        ),
+                      ),
+                    if (_error != null)
+                      SliverPadding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontal,
+                          0,
+                          horizontal,
+                          16,
+                        ),
+                        sliver: SliverToBoxAdapter(
+                          child: _ErrorStrip(
+                            message: _error!,
+                            onRetry: _reloadLibrary,
+                            onDismiss: _dismissError,
+                          ),
+                        ),
+                      ),
+                    if (_loading)
+                      _LibraryItems(
+                        horizontalPadding: horizontal,
+                        columns: columns,
+                        loading: true,
+                        entries: const [],
+                        openingPaths: const {},
+                        onOpen: _openEntry,
+                        useInternalTitles: _useInternalTitles,
+                      )
+                    else if (_entries.isEmpty)
+                      SliverFillRemaining(
+                        hasScrollBody: false,
+                        child: _EmptyLibrary(
+                          onImport: _importScore,
+                          onOpenFolder: _importFolder,
+                        ),
+                      )
+                    else
+                      _LibraryItems(
+                        horizontalPadding: horizontal,
+                        columns: columns,
+                        loading: false,
+                        entries: _entries,
+                        openingPaths: _openingPaths,
+                        onOpen: _openEntry,
+                        useInternalTitles: _useInternalTitles,
+                        onVisible: _noteVisibleCard,
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+          if (_randomLoading)
+            const Positioned.fill(child: _RandomStartOverlay()),
+        ],
       ),
       bottomNavigationBar: _loading || _entries.isEmpty
           ? null
           : _RandomStartBar(onStart: _startRandom),
+    );
+  }
+}
+
+/// Loading sign for 开始随机: the same card the reader shows while switching
+/// pieces, so a slow score preparation is never a silent wait.
+class _RandomStartOverlay extends StatelessWidget {
+  const _RandomStartOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AbsorbPointer(
+      child: ColoredBox(
+        color: theme.colorScheme.surface.withValues(alpha: 0.72),
+        child: Center(
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox.square(
+                    dimension: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2.4),
+                  ),
+                  const SizedBox(width: 14),
+                  Text('正在载入谱面…', style: theme.textTheme.bodyMedium),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -679,7 +923,8 @@ class _LibraryHeader extends StatelessWidget {
       icon: const Icon(Icons.add_rounded),
       label: const Text('打开目录'),
     );
-    final titleToggle = _InternalTitleToggle(
+    final titleToggle = MuseToggleButton(
+      label: '内部标题',
       value: useInternalTitles,
       onChanged: onToggleInternalTitles,
     );
@@ -737,55 +982,6 @@ class _LibraryHeader extends StatelessWidget {
   }
 }
 
-/// 内部标题 button: a square tick on the left of the label; the whole button
-/// toggles (the square itself is not separately interactive), styled like the
-/// other header buttons.
-class _InternalTitleToggle extends StatelessWidget {
-  const _InternalTitleToggle({required this.value, required this.onChanged});
-
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Semantics(
-      checked: value,
-      label: '内部标题',
-      child: OutlinedButton(
-        onPressed: () => onChanged(!value),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          foregroundColor: theme.colorScheme.onSurface,
-          side: BorderSide(
-            color: value
-                ? theme.colorScheme.primary
-                : theme.colorScheme.outlineVariant,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IgnorePointer(
-              child: Checkbox(
-                value: value,
-                onChanged: (_) {},
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                side: BorderSide(color: theme.colorScheme.onSurfaceVariant),
-              ),
-            ),
-            const SizedBox(width: 8),
-            const Flexible(
-              child: Text('内部标题', maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _LibraryItems extends StatelessWidget {
   const _LibraryItems({
     required this.horizontalPadding,
@@ -795,6 +991,7 @@ class _LibraryItems extends StatelessWidget {
     required this.openingPaths,
     required this.onOpen,
     required this.useInternalTitles,
+    this.onVisible,
   });
 
   final double horizontalPadding;
@@ -805,12 +1002,17 @@ class _LibraryItems extends StatelessWidget {
   final ValueChanged<ScoreLibraryEntry> onOpen;
   final bool useInternalTitles;
 
+  /// Reports every card the sliver builders materialise, in index order, so
+  /// the page knows which card is the bottom-most one on screen.
+  final ValueChanged<String>? onVisible;
+
   @override
   Widget build(BuildContext context) {
     final itemCount = loading ? (columns == 1 ? 3 : 4) : entries.length;
     Widget itemBuilder(BuildContext context, int index) {
       if (loading) return const _LoadingScoreCard();
       final entry = entries[index];
+      onVisible?.call(entry.sourcePath);
       return _ScoreCard(
         entry: entry,
         opening: openingPaths.contains(entry.sourcePath),
@@ -900,18 +1102,38 @@ class _ScoreCard extends StatelessWidget {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _ScorePreview(entry: entry, width: previewWidth),
-                      const SizedBox(width: 12),
+                      if (!entry.isAudio) ...[
+                        _ScorePreview(entry: entry, width: previewWidth),
+                        const SizedBox(width: 12),
+                      ],
                       Expanded(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.titleMedium,
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (entry.isAudio) ...[
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Icon(
+                                      Icons.audiotrack_rounded,
+                                      size: 20,
+                                      color: theme.colorScheme.primary,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                ],
+                                Expanded(
+                                  child: Text(
+                                    title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.titleMedium,
+                                  ),
+                                ),
+                              ],
                             ),
                             if (composer.isNotEmpty) ...[
                               const SizedBox(height: 4),
@@ -951,7 +1173,7 @@ class _ScoreCard extends StatelessWidget {
                       if (showChevron) ...[
                         const SizedBox(width: 4),
                         SizedBox(
-                          height: previewWidth * 1.4,
+                          height: entry.isAudio ? 32 : previewWidth * 1.4,
                           child: Center(
                             child: opening
                                 ? const SizedBox.square(
@@ -1032,6 +1254,7 @@ class _ScorePreview extends StatelessWidget {
           );
     return RepaintBoundary(
       child: Container(
+        key: const ValueKey<String>('library-score-preview'),
         width: width,
         height: height,
         clipBehavior: Clip.antiAlias,

@@ -6,12 +6,16 @@ import 'package:flutter/material.dart';
 import '../model/audio_item.dart';
 import '../model/score_document.dart';
 import '../model/score_library_entry.dart';
+import '../playback/advance_policy.dart';
 import '../playback/audio_playback_controller.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_handle.dart';
 import '../playback/score_queue.dart';
+import '../services/file_picker_service.dart';
 import '../services/media_commands.dart';
+import '../services/media_player_bridge.dart';
 import 'score_page_painter.dart';
+import 'toggle_button.dart';
 
 class ReaderPage extends StatefulWidget {
   const ReaderPage({
@@ -66,6 +70,20 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _switching = false;
   bool _wasPlaying = false;
 
+  /// Fallback for a finished piece that never handed over: the position
+  /// sampling timer can be starved while the app is in the background, so a
+  /// low-frequency watchdog re-checks the ended state and advances.
+  Timer? _advanceWatchdog;
+  int _stalledEndTicks = 0;
+
+  /// 熄屏不打断下一首: default on; the user's choice is remembered.
+  static const _advanceWhenScreenOffKey = 'advance_when_screen_off';
+  bool _advanceWhenScreenOff = true;
+  bool _advanceSettingTouched = false;
+
+  /// A finished piece whose advance was suppressed because the screen was off.
+  bool _pendingAdvance = false;
+
   /// Score-specific view of the transport (null while an audio file plays).
   PlaybackController? get _scorePlayback =>
       _document == null || _playback is! PlaybackController
@@ -95,8 +113,15 @@ class _ReaderPageState extends State<ReaderPage> {
     widget.queue
       ?..setCurrentId(_currentId)
       ..addListener(_onQueueChanged);
+    unawaited(_restoreAdvancePreference());
     MediaCommands.onPauseRequested = _pauseFromPlatform;
     MediaCommands.onMediaCompleted = _mediaCompleted;
+    MediaCommands.onScoreCompleted = _scoreCompleted;
+    MediaCommands.onScreenOn = _screenTurnedOn;
+    _advanceWatchdog = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => _checkStalledAdvance(),
+    );
     if (widget.autoplay) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_play());
@@ -116,6 +141,29 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
+  Future<void> _restoreAdvancePreference() async {
+    final stored = await FilePickerService().readBooleanPreference(
+      _advanceWhenScreenOffKey,
+      fallback: true,
+    );
+    if (!mounted || _advanceSettingTouched) return;
+    if (stored != _advanceWhenScreenOff) {
+      setState(() => _advanceWhenScreenOff = stored);
+    }
+  }
+
+  void _setAdvanceWhenScreenOff(bool value) {
+    if (_advanceWhenScreenOff == value) return;
+    _advanceSettingTouched = true;
+    setState(() => _advanceWhenScreenOff = value);
+    unawaited(
+      FilePickerService().writeBooleanPreference(
+        _advanceWhenScreenOffKey,
+        value,
+      ),
+    );
+  }
+
   /// Stop action of the playback notification: pause this reader.
   Future<void> _pauseFromPlatform() async {
     if (!mounted) return;
@@ -127,6 +175,64 @@ class _ReaderPageState extends State<ReaderPage> {
     if (!mounted) return;
     final playback = _playback;
     if (playback is AudioPlaybackController) playback.handleCompleted();
+  }
+
+  /// The embedded score renderer reached the end of its audio stream.
+  void _scoreCompleted() {
+    if (!mounted) return;
+    final playback = _playback;
+    if (playback is PlaybackController) playback.handleCompleted();
+  }
+
+  /// The screen came back on: with 熄屏不打断下一首 off, load the next piece so
+  /// the reader only waits for the ▶ button (no auto-play).
+  void _screenTurnedOn() {
+    if (!mounted) return;
+    unawaited(_preloadPendingAdvance());
+  }
+
+  /// Loads the piece whose advance was suppressed while the screen was off.
+  /// Playback stays paused; the ▶ button starts it.
+  Future<void> _preloadPendingAdvance() async {
+    if (!_pendingAdvance || _switching) return;
+    final queue = widget.queue;
+    if (queue == null) return;
+    if (!await MediaPlayerBridge.screenIsOn()) return;
+    if (!mounted || !_pendingAdvance) return;
+    final index = queue.endOfPieceIndex();
+    if (index == null) return;
+    _pendingAdvance = false;
+    await _switchToPiece(queue.ids[index], autoplay: false);
+  }
+
+  /// Low-frequency safety net: a piece that has ended without the queue moving
+  /// on (for example because the sampling timer was not scheduled while the
+  /// screen was off) is advanced here.
+  void _checkStalledAdvance() {
+    if (!mounted || _switching) return;
+    final queue = widget.queue;
+    if (queue == null) return;
+    final duration = _playback.durationUs;
+    if (duration <= 0 || _playback.isPlaying) {
+      _stalledEndTicks = 0;
+      return;
+    }
+    if (_playback.positionUs < duration) {
+      _stalledEndTicks = 0;
+      return;
+    }
+    if (queue.effectiveLoop == PlayLoop.none) return;
+    // A suppressed advance waits for the screen to come back (then the piece is
+    // preloaded, still paused) and for the ▶ button to start it.
+    if (_pendingAdvance) {
+      unawaited(_preloadPendingAdvance());
+      return;
+    }
+    _stalledEndTicks += 1;
+    // Two ticks (≈4 s) so the normal end path has every chance to run first.
+    if (_stalledEndTicks < 2) return;
+    _stalledEndTicks = 0;
+    unawaited(_handlePieceEnded());
   }
 
   void _onQueueChanged() {
@@ -144,6 +250,7 @@ class _ReaderPageState extends State<ReaderPage> {
     // to pick the piece that just finished.
     if (!wasPlaying && _playback.isPlaying) {
       widget.queue?.recordCurrent();
+      _stalledEndTicks = 0;
     }
     final scorePlayback = _scorePlayback;
     final document = _document;
@@ -190,6 +297,14 @@ class _ReaderPageState extends State<ReaderPage> {
     if (MediaCommands.onMediaCompleted == _mediaCompleted) {
       MediaCommands.onMediaCompleted = null;
     }
+    if (MediaCommands.onScoreCompleted == _scoreCompleted) {
+      MediaCommands.onScoreCompleted = null;
+    }
+    if (MediaCommands.onScreenOn == _screenTurnedOn) {
+      MediaCommands.onScreenOn = null;
+    }
+    _advanceWatchdog?.cancel();
+    _advanceWatchdog = null;
     widget.queue?.removeListener(_onQueueChanged);
     _playback.dispose();
     super.dispose();
@@ -202,9 +317,30 @@ class _ReaderPageState extends State<ReaderPage> {
   Future<void> _handlePieceEnded() async {
     final queue = widget.queue;
     if (queue == null || _switching) return;
+    if (_pendingAdvance) return;
     final index = queue.endOfPieceIndex();
     if (index == null) return;
+    // 熄屏不打断下一首 off: keep this piece while the screen is off; the ▶
+    // button continues with the next piece after the screen is back on.
+    if (suppressAdvanceForScreenOff(
+      advanceWhenScreenOff: _advanceWhenScreenOff,
+      screenOn: await MediaPlayerBridge.screenIsOn(),
+    )) {
+      if (mounted) _pendingAdvance = true;
+      return;
+    }
     await _switchToPiece(queue.ids[index], autoplay: true);
+  }
+
+  /// Transport ▶/⏸: a suppressed advance resumes the playlist instead of
+  /// replaying the finished piece.
+  Future<void> _onPlayPausePressed() async {
+    if (_pendingAdvance) {
+      _pendingAdvance = false;
+      await _handlePieceEnded();
+      return;
+    }
+    await _playback.toggle();
   }
 
   /// The "next piece" control. Manual switches keep playing only when
@@ -263,6 +399,7 @@ class _ReaderPageState extends State<ReaderPage> {
   Future<void> _switchToPiece(String id, {required bool autoplay}) async {
     final queue = widget.queue;
     if (queue == null) return;
+    _pendingAdvance = false;
     if (id == _currentId) {
       // Same piece (single-loop replay or restart): no load needed.
       await _playback.restart();
@@ -454,11 +591,24 @@ class _ReaderPageState extends State<ReaderPage> {
               onSelectLoop: _selectLoop,
             ),
           ],
+          if (queue != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 2, 12, 4),
+              child: Center(
+                child: MuseToggleButton(
+                  label: '熄屏不打断下一首',
+                  value: _advanceWhenScreenOff,
+                  onChanged: _setAdvanceWhenScreenOff,
+                  dense: true,
+                ),
+              ),
+            ),
           _TransportBar(
             playback: _playback,
             page: _visiblePage,
             pageCount: document?.pages.length,
             onPageChanged: _changePage,
+            onPlayPause: _onPlayPausePressed,
           ),
         ],
       ),
@@ -1496,12 +1646,14 @@ class _TransportBar extends StatelessWidget {
     required this.page,
     required this.pageCount,
     required this.onPageChanged,
+    required this.onPlayPause,
   });
 
   final PlaybackHandle playback;
   final int page; // only used by the score page navigator
   final int? pageCount; // null for audio items: no page navigator
   final Future<void> Function(int page) onPageChanged;
+  final Future<void> Function() onPlayPause;
 
   @override
   Widget build(BuildContext context) {
@@ -1556,7 +1708,7 @@ class _TransportBar extends StatelessWidget {
                 final playButton = Semantics(
                   toggled: playback.isPlaying,
                   child: IconButton.filled(
-                    onPressed: playback.toggle,
+                    onPressed: onPlayPause,
                     icon: Icon(
                       playback.isPlaying
                           ? Icons.pause_rounded

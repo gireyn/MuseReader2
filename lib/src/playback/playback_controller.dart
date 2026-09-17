@@ -165,6 +165,26 @@ class PlaybackController extends ChangeNotifier implements PlaybackHandle {
     notifyListeners();
   }
 
+  /// The platform renderer reports that the score's audio stream finished.
+  /// Latches "stopped at the end" so the reader's end-of-piece detection can
+  /// advance the queue — this path does not depend on the sampling timer, so it
+  /// also works while the screen is off.
+  void handleCompleted() {
+    if (durationUs <= 0) return;
+    if (!_isPlaying && _positionUs >= durationUs) return;
+    _playbackGeneration += 1;
+    _timer?.cancel();
+    _timer = null;
+    _clock?.stop();
+    _clock = null;
+    _audioPositionUs = null;
+    _isPlaying = false;
+    _cursorVisible = false;
+    _positionUs = durationUs;
+    unawaited(MuseScoreBridge.stopAudio());
+    notifyListeners();
+  }
+
   Future<void> setSpeed(double value) async {
     final next = value.clamp(0.5, 2.0).toDouble();
     if ((next - _speed).abs() < 0.001) return;

@@ -32,6 +32,12 @@ class MainActivity : FlutterActivity() {
         private const val KEY_TREE_URI = "granted_tree_uri"
         private const val TAG = "MuseReaderAudio"
         private val SCORE_EXTENSIONS = setOf("mscx", "mscz")
+        private const val LIBRARY_SIDECAR_SUFFIX = ".musereader-library-v1.json"
+        private val SIDECAR_SUFFIXES = listOf(
+            ".musereader-library-v1.json",
+            ".musereader-cover-v1.png",
+            ".musereader-document-v1.json.gz",
+        )
         private val AUDIO_EXTENSIONS = setOf(
             "mp3", "wav", "wave", "ogg", "oga", "opus", "flac",
             "m4a", "aac", "mp4", "m4b", "wma", "aif", "aiff", "amr", "3gp",
@@ -42,6 +48,8 @@ class MainActivity : FlutterActivity() {
     private var pendingFolderResult: MethodChannel.Result? = null
     private var controlsChannel: MethodChannel? = null
     private lateinit var mediaPlayer: MediaAudioPlayer
+    private var renderWakeLock: android.os.PowerManager.WakeLock? = null
+    private var screenReceiver: android.content.BroadcastReceiver? = null
     private var notificationPermissionAsked = false
     private lateinit var fallbackSynth: SimpleScoreSynth
     private lateinit var fluidSynth: FluidScoreSynth
@@ -51,6 +59,11 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         fallbackSynth = SimpleScoreSynth()
         fluidSynth = FluidScoreSynth()
+        fluidSynth.onScoreCompleted = {
+            runOnUiThread {
+                runCatching { controlsChannel?.invokeMethod("scoreCompleted", null) }
+            }
+        }
         val engineAvailable = NativeMuseScoreEngine.isAvailable()
         val engineReady = engineAvailable && NativeMuseScoreEngine.initialize()
 
@@ -72,6 +85,9 @@ class MainActivity : FlutterActivity() {
                 runCatching { controls.invokeMethod("mediaCompleted", null) }
             }
         }
+        // 熄屏不打断下一首: the reader needs to know when the screen comes back
+        // so it can preload the next piece and wait for the play button.
+        registerScreenStateReceiver()
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, MEDIA_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -111,6 +127,13 @@ class MainActivity : FlutterActivity() {
                     }
                     "position" -> result.success(mediaPlayer.positionMs())
                     "isPlaying" -> result.success(mediaPlayer.isPlaying())
+                    "isInteractive" -> {
+                        // 熄屏不打断下一首: the reader asks whether the screen is
+                        // on at the moment a piece ends.
+                        val manager = getSystemService(Context.POWER_SERVICE)
+                            as android.os.PowerManager
+                        result.success(manager.isInteractive)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -231,7 +254,14 @@ class MainActivity : FlutterActivity() {
                             )
                         } else {
                             engineExecutor.execute {
-                                val json = NativeMuseScoreEngine.open(path)
+                                acquireRenderWakeLock()
+                                val json = try {
+                                    NativeMuseScoreEngine.open(path)
+                                } finally {
+                                    releaseRenderWakeLock()
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
+                                }
                                 val response = if (json == null) {
                                     mapOf(
                                         "available" to engineAvailable,
@@ -438,45 +468,109 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Import every valid score file found DIRECTLY inside the folder of a
-     * granted tree (non-recursive). The previous library is replaced: the
-     * import directory is cleared first and only this folder's scores are
-     * copied back in, ordered by display name so the library keeps a stable,
-     * predictable collection. Each copy carries a descending modification
+     * Import every valid file found DIRECTLY inside the folder of a granted
+     * tree (non-recursive). The collection is replaced by this folder's files,
+     * ordered by display name, and each copy carries a descending modification
      * time so the newest-first listing reproduces the import order after a
      * process restart.
+     *
+     * Files that are already imported with the same name and size are REUSED
+     * in place instead of being re-copied: the metadata/cover/document sidecar
+     * caches live next to them, so titles, authors, thumbnails and rendered
+     * documents survive re-importing the same folder. The sidecar's stored
+     * modification time is refreshed because the file's mtime is used for the
+     * collection order.
      */
     private fun importScoreFolder(treeUriString: String, documentId: String): List<String> {
         val tree = Uri.parse(treeUriString)
         val directory = importedScoresDirectory()
-        directory.listFiles()?.forEach { it.delete() }
         val children = treeChildren(tree, effectiveTreeDocumentId(tree, documentId))
             .filter { row ->
                 row.mime != DocumentsContract.Document.MIME_TYPE_DIR &&
                     isSupportedScoreFile(row.displayName)
             }
             .sortedBy { row -> row.displayName.lowercase() }
-        if (children.isEmpty()) return emptyList()
+        if (children.isEmpty()) {
+            directory.listFiles()?.forEach { it.delete() }
+            return emptyList()
+        }
+
+        val existing = directory.listFiles()
+            ?.filter { it.isFile && isSupportedScoreFile(it.name) }
+            ?.associateBy { cleanImportName(it.name) }
+            ?: emptyMap()
 
         val base = System.currentTimeMillis()
         val imported = ArrayList<String>(children.size)
+        val reused = HashSet<String>()
         children.forEachIndexed { index, row ->
-            val childUri = DocumentsContract.buildDocumentUriUsingTree(
-                tree,
-                row.documentId,
-            )
             val safeName = row.displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-            val target = File(directory, "${base - index}_$safeName")
-            contentResolver.openInputStream(childUri).use { input ->
-                requireNotNull(input) { "Cannot open ${row.displayName}." }
-                target.outputStream().use { output -> input.copyTo(output) }
+            val candidate = existing[safeName]
+            val target = if (candidate != null &&
+                !reused.contains(candidate.name) &&
+                (row.size < 0L || candidate.length() == row.size)
+            ) {
+                // Same file, same size: keep it and its cached sidecars.
+                candidate
+            } else {
+                val destination = File(directory, "${base - index}_$safeName")
+                val childUri = DocumentsContract.buildDocumentUriUsingTree(
+                    tree,
+                    row.documentId,
+                )
+                contentResolver.openInputStream(childUri).use { input ->
+                    requireNotNull(input) { "Cannot open ${row.displayName}." }
+                    destination.outputStream().use { output -> input.copyTo(output) }
+                }
+                destination
             }
+            reused += target.name
             // Some providers ignore setLastModified; the numeric name prefix
             // keeps the per-file identity unique across imports either way.
             target.setLastModified(base - index)
+            refreshLibrarySidecar(target)
             imported += target.absolutePath
         }
+
+        pruneImportedDirectory(directory, imported)
         return imported
+    }
+
+    /** Import-order prefix of a stored file: "1750000000000_alpha.mscx". */
+    private fun cleanImportName(name: String): String =
+        name.replace(Regex("^\\d{13}(?:_\\d+)?_"), "")
+
+    /**
+     * The library metadata sidecar records the source file's size and
+     * modification time; keep the modification time in sync so reusing a file
+     * (and therefore its cached title/cover) does not invalidate the cache.
+     */
+    private fun refreshLibrarySidecar(file: File) {
+        val sidecar = File(file.parentFile, file.name + LIBRARY_SIDECAR_SUFFIX)
+        if (!sidecar.isFile) return
+        runCatching {
+            val text = sidecar.readText()
+            val updated = text.replace(
+                Regex("\"sourceModifiedUs\"\\s*:\\s*\\d+"),
+                "\"sourceModifiedUs\":${file.lastModified() * 1000}",
+            )
+            if (updated != text) sidecar.writeText(updated)
+        }
+    }
+
+    /** Drop files that are no longer part of the collection, and orphan caches. */
+    private fun pruneImportedDirectory(directory: File, keep: List<String>) {
+        val keepPaths = keep.toHashSet()
+        directory.listFiles()?.forEach { file ->
+            val path = file.absolutePath
+            if (keepPaths.contains(path)) return@forEach
+            val basePath = SIDECAR_SUFFIXES
+                .firstOrNull { path.endsWith(it) }
+                ?.let { path.substring(0, path.length - it.length) }
+            val isOrphanSidecar = basePath != null && !keepPaths.contains(basePath)
+            val isDroppedMedia = basePath == null && isSupportedScoreFile(file.name)
+            if (isOrphanSidecar || isDroppedMedia) file.delete()
+        }
     }
 
     /**
@@ -503,6 +597,7 @@ class MainActivity : FlutterActivity() {
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                 DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE,
             ),
             null,
             null,
@@ -511,11 +606,17 @@ class MainActivity : FlutterActivity() {
             val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
             val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             val mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
             while (cursor.moveToNext()) {
                 rows += ChildRow(
                     documentId = cursor.getString(idIndex) ?: "",
                     displayName = cursor.getString(nameIndex) ?: "",
                     mime = cursor.getString(mimeIndex) ?: "",
+                    size = if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                        cursor.getLong(sizeIndex)
+                    } else {
+                        -1L
+                    },
                 )
             }
         }
@@ -527,6 +628,7 @@ class MainActivity : FlutterActivity() {
         val documentId: String,
         val displayName: String,
         val mime: String,
+        val size: Long = -1L,
     )
 
     private fun listScoreFolderContents(
@@ -618,6 +720,65 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun registerScreenStateReceiver() {
+        if (screenReceiver != null) return
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val method = when (intent?.action) {
+                    Intent.ACTION_SCREEN_ON -> "screenOn"
+                    Intent.ACTION_SCREEN_OFF -> "screenOff"
+                    else -> return
+                }
+                runCatching { controlsChannel?.invokeMethod(method, null) }
+            }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(receiver, filter)
+            }
+            screenReceiver = receiver
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to observe the screen state", error)
+        }
+    }
+
+    /**
+     * Rendering a score is CPU work that must not be interrupted when the
+     * screen is off and the app is in the background (the piece auto-advance
+     * renders the next score before playing it). A short-timeout wake lock
+     * covers exactly the render, independently of the playback service.
+     */
+    private fun acquireRenderWakeLock() {
+        try {
+            if (renderWakeLock?.isHeld != true) {
+                val manager = getSystemService(Context.POWER_SERVICE)
+                    as android.os.PowerManager
+                renderWakeLock = manager
+                    .newWakeLock(
+                        android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                        "MuseReader:render",
+                    )
+                    .apply { setReferenceCounted(false) }
+                renderWakeLock?.acquire(120_000L)
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to acquire the render wake lock", error)
+        }
+    }
+
+    private fun releaseRenderWakeLock() {
+        val lock = renderWakeLock ?: return
+        renderWakeLock = null
+        runCatching { if (lock.isHeld) lock.release() }
+    }
+
     /**
      * Android is short on memory: ask Flutter to release decoded images and,
      * for the strongest levels, every hydrated score document except the one
@@ -634,6 +795,7 @@ class MainActivity : FlutterActivity() {
         if (::fluidSynth.isInitialized) fluidSynth.stop()
         if (::fallbackSynth.isInitialized) fallbackSynth.stop()
         if (::mediaPlayer.isInitialized) mediaPlayer.stop()
+        releaseRenderWakeLock()
         PlaybackService.pauseRequest = null
         PlaybackService.stop(this)
         engineExecutor.shutdownNow()

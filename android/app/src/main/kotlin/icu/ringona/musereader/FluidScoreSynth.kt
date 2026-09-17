@@ -31,6 +31,10 @@ class FluidScoreSynth {
     private var writtenFrames = 0L
     private var lastPositionUs = 0L
 
+    /** Invoked when the score's audio stream reached its natural end. */
+    @Volatile
+    var onScoreCompleted: (() -> Unit)? = null
+
     /** Starts native playback, returning false when the embedded renderer is unavailable. */
     fun start(rawEvents: List<Any?>, positionUs: Long, speed: Double): Boolean {
         stop()
@@ -218,10 +222,15 @@ class FluidScoreSynth {
             }
             if (!isCurrent(localGeneration) || bufferedFrames <= 0) return
             audio.play()
+            var completedNaturally = false
             while (isCurrent(localGeneration)) {
                 val frames = NativeMuseScoreEngine.audioRender(floatBuffer)
                 if (frames <= 0) {
-                    if (!NativeMuseScoreEngine.audioIsActive()) break
+                    if (!NativeMuseScoreEngine.audioIsActive()) {
+                        // The renderer ran out of events: the score ended.
+                        completedNaturally = true
+                        break
+                    }
                     Thread.yield()
                     continue
                 }
@@ -241,7 +250,10 @@ class FluidScoreSynth {
                 if (offset > 0) recordWrittenFrames(audio, offset / 2)
                 if (offset < sampleCount && isCurrent(localGeneration)) break
             }
-            if (isCurrent(localGeneration)) waitForDrain(audio, localGeneration)
+            if (isCurrent(localGeneration)) {
+                waitForDrain(audio, localGeneration)
+                if (completedNaturally) onScoreCompleted?.invoke()
+            }
         } catch (error: Throwable) {
             if (isCurrent(localGeneration)) Log.w(TAG, "FluidSynth audio stream stopped", error)
         } finally {

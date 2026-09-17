@@ -8,7 +8,10 @@ import 'package:flutter/services.dart';
 ///  * `memoryPressure` — `Activity.onTrimMemory` levels; the library releases
 ///    decoded images and hydrated documents to avoid an out-of-memory kill;
 ///  * `mediaCompleted` — the platform media player reached the end of an
-///    audio file, which advances the collection queue just like a score does.
+///    audio file, which advances the collection queue just like a score does;
+///  * `scoreCompleted` — the FluidSynth renderer finished the score's audio
+///    stream. This advances the queue even when the Dart timer that samples the
+///    playback position is not being scheduled (screen off / app backgrounded).
 class MediaCommands {
   MediaCommands._();
 
@@ -23,6 +26,14 @@ class MediaCommands {
   /// Set by the audio playback controller while an audio item is loaded.
   static void Function()? onMediaCompleted;
 
+  /// Set by the reader while a score plays: the embedded FluidSynth renderer
+  /// reached the end of the score's audio stream.
+  static void Function()? onScoreCompleted;
+
+  /// Screen turned on again (used to preload the next piece after a suppressed
+  /// advance). The reader also polls this in its watchdog as a fallback.
+  static void Function()? onScreenOn;
+
   static void attach() {
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
@@ -32,6 +43,12 @@ class MediaCommands {
           break;
         case 'mediaCompleted':
           onMediaCompleted?.call();
+          break;
+        case 'scoreCompleted':
+          onScoreCompleted?.call();
+          break;
+        case 'screenOn':
+          onScreenOn?.call();
           break;
         case 'memoryPressure':
           final level = (call.arguments as num?)?.toInt() ?? 0;

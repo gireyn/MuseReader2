@@ -11,12 +11,24 @@ import 'package:muse_reader/src/ui/reader_page.dart';
 /// Shared fakes for the library widget tests: they avoid real asynchronous
 /// file I/O, which does not progress inside `testWidgets`.
 class FakeLibraryRepository implements ScoreRepository {
-  FakeLibraryRepository(this.documents);
+  FakeLibraryRepository(
+    this.documents, {
+    this.delay = Duration.zero,
+    this.gate,
+  });
 
   final Map<String, ScoreDocument> documents;
 
+  /// Simulated native render latency, used to observe loading indicators.
+  final Duration delay;
+
+  /// Optional gate: opening waits for it, so a test can hold a load open.
+  final Future<void>? gate;
+
   @override
   Future<ScoreDocument> open(String path) async {
+    if (gate != null) await gate;
+    if (delay > Duration.zero) await Future<void>.delayed(delay);
     final document = documents[path];
     if (document == null) throw StateError('unknown score: $path');
     return document;
@@ -34,14 +46,20 @@ class FakeLibraryRepository implements ScoreRepository {
 /// [documents] are already hydrated (title/composer/page count known), audio
 /// files stay placeholders and are filled in from the platform metadata call.
 class FakeLibraryCache implements ScoreLibraryCache {
-  FakeLibraryCache(this.documents);
+  FakeLibraryCache(this.documents, {this.warm = true});
 
   final Map<String, ScoreDocument> documents;
+
+  /// When false the cache behaves like a cold one: every entry starts as a
+  /// placeholder and metadata/cover generation must fill it in.
+  final bool warm;
 
   @override
   Future<ScoreLibraryEntry> readOrPlaceholder(String sourcePath) async {
     final document = documents[sourcePath];
-    if (document == null) return ScoreLibraryEntry.placeholder(sourcePath);
+    if (!warm || document == null) {
+      return ScoreLibraryEntry.placeholder(sourcePath);
+    }
     return ScoreLibraryEntry.fromDocument(document);
   }
 
@@ -83,7 +101,7 @@ const mediaChannel = MethodChannel('com.musereader/media');
 /// preference and audio metadata.
 void mockFilesChannel({
   List<String> imports = const [],
-  bool storedBooleanPreference = false,
+  Map<String, bool> storedPreferences = const {},
   Map<String, Map<String, Object?>> audioMetadata = const {},
   void Function(String key, bool value)? onPreferenceWritten,
 }) {
@@ -96,7 +114,9 @@ void mockFilesChannel({
       case 'storedScoreFolderTree':
         return null;
       case 'getBooleanPreference':
-        return storedBooleanPreference;
+        // Only explicitly stored keys answer; others return null so the app
+        // applies its own default (内部标题 off, 熄屏不打断下一首 on).
+        return storedPreferences[call.arguments['key'] as String];
       case 'setBooleanPreference':
         onPreferenceWritten?.call(
           call.arguments['key'] as String,
@@ -120,6 +140,7 @@ void mockMediaChannel({
   int durationMs = 60000,
   bool available = true,
   List<String>? calls,
+  bool screenOn = true,
 }) {
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -144,6 +165,8 @@ void mockMediaChannel({
         return 0;
       case 'isPlaying':
         return playing;
+      case 'isInteractive':
+        return screenOn;
     }
     return null;
   });
@@ -161,9 +184,12 @@ Future<void> pumpFakeLibrary(
   WidgetTester tester, {
   required List<String> imports,
   required Map<String, ScoreDocument> documents,
-  bool storedBooleanPreference = false,
+  Map<String, bool> storedPreferences = const {},
   Map<String, Map<String, Object?>> audioMetadata = const {},
   void Function(String key, bool value)? onPreferenceWritten,
+  bool warmCache = true,
+  Duration repositoryDelay = Duration.zero,
+  Future<void>? repositoryGate,
 }) async {
   tester.view.physicalSize = const Size(420, 900);
   tester.view.devicePixelRatio = 1;
@@ -173,15 +199,19 @@ Future<void> pumpFakeLibrary(
   });
   mockFilesChannel(
     imports: imports,
-    storedBooleanPreference: storedBooleanPreference,
+    storedPreferences: storedPreferences,
     audioMetadata: audioMetadata,
     onPreferenceWritten: onPreferenceWritten,
   );
   await tester.pumpWidget(
     MaterialApp(
       home: LibraryPage(
-        repository: FakeLibraryRepository(documents),
-        libraryCache: FakeLibraryCache(documents),
+        repository: FakeLibraryRepository(
+          documents,
+          delay: repositoryDelay,
+          gate: repositoryGate,
+        ),
+        libraryCache: FakeLibraryCache(documents, warm: warmCache),
       ),
     ),
   );
@@ -195,6 +225,21 @@ Future<void> pumpUntilReader(WidgetTester tester) async {
     await tester.pump(const Duration(milliseconds: 60));
     if (find.byType(ReaderPage).evaluate().isNotEmpty) return;
   }
+}
+
+/// Sends a platform -> Dart method call on [channel] (for example the screen-on
+/// broadcast or a media-completion callback).
+Future<void> sendPlatformCall(
+  WidgetTester tester,
+  String channel,
+  String method,
+) async {
+  await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .handlePlatformMessage(
+        channel,
+        const StandardMethodCodec().encodeMethodCall(MethodCall(method)),
+        (_) {},
+      );
 }
 
 bool readerShowsTitle(String title) => find

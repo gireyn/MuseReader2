@@ -36,8 +36,12 @@ class PlaybackService : Service() {
         private const val CHANNEL_ID = "muse_reader_playback"
         private const val NOTIFICATION_ID = 4101
 
-        /** Grace period that keeps the service alive across a piece change. */
-        private const val STOP_GRACE_MS = 3000L
+        /**
+         * Grace period that keeps the service (and its wake lock) alive across
+         * a piece change: rendering the next score natively can take several
+         * seconds, and the CPU must not fall asleep in between.
+         */
+        private const val STOP_GRACE_MS = 20000L
 
         /** Set by MainActivity; asks Flutter to pause the current playback. */
         @Volatile

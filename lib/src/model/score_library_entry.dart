@@ -84,10 +84,11 @@ class ScoreLibraryEntry {
   /// engraved MuseScore document.
   bool get isAudio => format == ScoreFormat.audio;
 
-  /// Copy carrying metadata read from an audio file's tags (ID3/Vorbis/MP4).
-  ScoreLibraryEntry withAudioMetadata({
+  /// Copy carrying metadata read from the file itself — audio tags or the
+  /// MuseScore title/composer read without engraving the score.
+  ScoreLibraryEntry withMetadata({
     String? title,
-    String? artist,
+    String? composer,
     int? durationUs,
   }) {
     return ScoreLibraryEntry(
@@ -95,7 +96,7 @@ class ScoreLibraryEntry {
       fileName: fileName,
       format: format,
       title: title == null || title.isEmpty ? this.title : title,
-      composer: artist == null || artist.isEmpty ? composer : artist,
+      composer: composer == null || composer.isEmpty ? this.composer : composer,
       pageCount: pageCount,
       durationUs: durationUs ?? this.durationUs,
       coverBytes: coverBytes,

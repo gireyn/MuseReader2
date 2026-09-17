@@ -93,7 +93,7 @@ void main() {
       tester,
       imports: const [flac],
       documents: const {},
-      storedBooleanPreference: true,
+      storedPreferences: const {'use_internal_titles': true},
       audioMetadata: {
         flac: {
           'title': 'Tagged Track',
