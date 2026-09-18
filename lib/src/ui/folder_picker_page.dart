@@ -47,7 +47,10 @@ class _FolderPickerPageState extends State<FolderPickerPage> {
     if (treeUri == null) {
       treeUri = await widget.picker.pickScoreFolder();
       if (treeUri == null) {
-        // The user cancelled the system picker: nothing to browse.
+        // The user cancelled the system picker: nothing to browse. That return
+        // trip is also where a picker with a hidden confirmation button leaves
+        // them, so explain it instead of dropping them back silently.
+        _explainMissingGrant();
         if (mounted) Navigator.of(context).pop();
         return;
       }
@@ -67,7 +70,14 @@ class _FolderPickerPageState extends State<FolderPickerPage> {
   /// Start over with a freshly granted tree (更换目录).
   Future<void> _grantFolder() async {
     final treeUri = await widget.picker.pickScoreFolder();
-    if (!mounted || treeUri == null) return;
+    if (!mounted) return;
+    if (treeUri == null) {
+      // Cancelling a re-grant only needs explaining while the current tree is
+      // unreadable (重新授权 on the error strip); with a healthy tree the user
+      // simply changed their mind.
+      if (_error != null) _explainMissingGrant();
+      return;
+    }
     setState(() {
       _treeUri = treeUri;
       _pathIds
@@ -77,6 +87,26 @@ class _FolderPickerPageState extends State<FolderPickerPage> {
       _error = null;
     });
     await _reloadContents();
+  }
+
+  /// Some system file pickers keep "USE THIS FOLDER" hidden until the user has
+  /// navigated into a grantable folder (the app asks the picker to open inside
+  /// one, but older pickers may ignore that). A user who comes back empty
+  /// handed is usually stuck on exactly that, so spell out the way out. The
+  /// app-level messenger keeps the message on screen across the pop.
+  void _explainMissingGrant() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text(
+            '未选择目录。若系统文件选择器底部没有 USE THIS FOLDER，'
+            '请先进入任意子目录再返回，按钮就会出现。',
+          ),
+          duration: Duration(seconds: 10),
+        ),
+      );
   }
 
   Future<void> _reloadContents() async {

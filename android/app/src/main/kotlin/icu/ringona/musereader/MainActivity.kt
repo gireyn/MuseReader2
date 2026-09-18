@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
@@ -30,6 +32,8 @@ class MainActivity : FlutterActivity() {
         private const val FOLDER_PREFS = "muse_reader_folder"
         private const val DISPLAY_PREFS = "muse_reader_display"
         private const val KEY_TREE_URI = "granted_tree_uri"
+        private const val EXTERNAL_STORAGE_AUTHORITY =
+            "com.android.externalstorage.documents"
         private const val TAG = "MuseReaderAudio"
         private val SCORE_EXTENSIONS = setOf("mscx", "mscz")
         private const val LIBRARY_SIDECAR_SUFFIX = ".musereader-library-v1.json"
@@ -351,14 +355,82 @@ class MainActivity : FlutterActivity() {
             return
         }
         pendingFolderResult = result
+        val initialUri = initialFolderUri()
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
             )
+            if (initialUri != null) {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
+            }
         }
+        Log.i(TAG, "folder picker opening at ${initialUri ?: "the picker default"}")
         startActivityForResult(intent, PICK_FOLDER_REQUEST)
     }
+
+    /**
+     * Location the system picker should start in, or null to leave the choice
+     * to DocumentsUI.
+     *
+     * The picker only reveals its "USE THIS FOLDER" button once it has
+     * navigated into a directory the user may actually grant. A fresh picker
+     * instead opens on its default location — frequently "Recent", or the last
+     * place used, which is often Downloads or the root of the volume, and
+     * neither of those can be granted on Android 11+ — so the button stayed
+     * hidden until the user stepped into another folder by hand. Naming an
+     * explicit grantable folder up front makes the button available the moment
+     * the picker opens.
+     */
+    private fun initialFolderUri(): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
+        return runCatching {
+            grantedFolderDocumentUri() ?: publicFolderDocumentUri()
+        }.getOrNull()
+    }
+
+    /** The already granted tree, as the document URI the picker expects. */
+    private fun grantedFolderDocumentUri(): Uri? {
+        val stored = folderPreferences().getString(KEY_TREE_URI, null)
+        if (stored.isNullOrBlank()) return null
+        val tree = Uri.parse(stored)
+        if (!DocumentsContract.isTreeUri(tree)) return null
+        val documentId = runCatching {
+            DocumentsContract.getTreeDocumentId(tree)
+        }.getOrNull()
+        if (documentId.isNullOrBlank()) return null
+        return DocumentsContract.buildDocumentUriUsingTree(tree, documentId)
+    }
+
+    /**
+     * First standard public folder that exists, falling back to Music, which
+     * every media volume carries. Android 11+ hides other apps' folders from a
+     * plain exists() check, and an unresolvable location only leaves
+     * DocumentsUI on its own default, so the fallback is safe either way.
+     */
+    @Suppress("DEPRECATION")
+    private fun publicFolderDocumentUri(): Uri {
+        val candidates = mutableListOf(
+            Environment.DIRECTORY_DOCUMENTS,
+            Environment.DIRECTORY_MUSIC,
+            Environment.DIRECTORY_PICTURES,
+        )
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            // Downloads stopped being grantable with Android 11.
+            candidates.add(Environment.DIRECTORY_DOWNLOADS)
+        }
+        for (name in candidates) {
+            val directory = Environment.getExternalStoragePublicDirectory(name)
+            if (directory != null && directory.exists()) return documentsUri(name)
+        }
+        return documentsUri(Environment.DIRECTORY_MUSIC)
+    }
+
+    private fun documentsUri(relativePath: String): Uri =
+        DocumentsContract.buildDocumentUri(
+            EXTERNAL_STORAGE_AUTHORITY,
+            "primary:$relativePath",
+        )
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
