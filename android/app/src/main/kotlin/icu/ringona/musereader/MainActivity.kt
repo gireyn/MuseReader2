@@ -552,6 +552,11 @@ class MainActivity : FlutterActivity() {
      * documents survive re-importing the same folder. The sidecar's stored
      * modification time is refreshed because the file's mtime is used for the
      * collection order.
+     *
+     * Copies land in a staging directory first ([replaceImportedScores]): the
+     * collection on disk is only touched once every file has been read, so a
+     * provider that fails halfway leaves the previous scores playable instead
+     * of a mixture of old files and partial copies.
      */
     private fun importScoreFolder(treeUriString: String, documentId: String): List<String> {
         val tree = Uri.parse(treeUriString)
@@ -563,7 +568,8 @@ class MainActivity : FlutterActivity() {
             }
             .sortedBy { row -> row.displayName.lowercase() }
         if (children.isEmpty()) {
-            directory.listFiles()?.forEach { it.delete() }
+            // The browser warned about the empty folder before confirming it.
+            directory.listFiles()?.forEach { it.deleteRecursively() }
             return emptyList()
         }
 
@@ -573,39 +579,55 @@ class MainActivity : FlutterActivity() {
             ?: emptyMap()
 
         val base = System.currentTimeMillis()
-        val imported = ArrayList<String>(children.size)
         val reused = HashSet<String>()
+        val plan = ArrayList<Pair<ChildRow, String>>(children.size)
+        val copies = LinkedHashMap<String, ChildRow>()
         children.forEachIndexed { index, row ->
             val safeName = row.displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
             val candidate = existing[safeName]
-            val target = if (candidate != null &&
+            if (candidate != null &&
                 !reused.contains(candidate.name) &&
                 (row.size < 0L || candidate.length() == row.size)
             ) {
                 // Same file, same size: keep it and its cached sidecars.
-                candidate
+                reused += candidate.name
+                plan += row to candidate.name
             } else {
-                val destination = File(directory, "${base - index}_$safeName")
+                val name = "${base - index}_$safeName"
+                copies[name] = row
+                plan += row to name
+            }
+        }
+
+        val keep = preservedImportNames(
+            existing = directory.listFiles()?.map { it.name } ?: emptyList(),
+            reused = reused,
+            sidecarSuffixes = SIDECAR_SUFFIXES,
+        )
+        replaceImportedScores(directory, keep) { staging ->
+            copies.forEach { (name, row) ->
                 val childUri = DocumentsContract.buildDocumentUriUsingTree(
                     tree,
                     row.documentId,
                 )
                 contentResolver.openInputStream(childUri).use { input ->
                     requireNotNull(input) { "Cannot open ${row.displayName}." }
-                    destination.outputStream().use { output -> input.copyTo(output) }
+                    File(staging, name).outputStream().use { output ->
+                        input.copyTo(output)
+                    }
                 }
-                destination
             }
-            reused += target.name
+            copies.keys.toList()
+        }
+
+        return plan.mapIndexed { index, (_, name) ->
+            val target = File(directory, name)
             // Some providers ignore setLastModified; the numeric name prefix
             // keeps the per-file identity unique across imports either way.
             target.setLastModified(base - index)
             refreshLibrarySidecar(target)
-            imported += target.absolutePath
+            target.absolutePath
         }
-
-        pruneImportedDirectory(directory, imported)
-        return imported
     }
 
     /** Import-order prefix of a stored file: "1750000000000_alpha.mscx". */
@@ -627,21 +649,6 @@ class MainActivity : FlutterActivity() {
                 "\"sourceModifiedUs\":${file.lastModified() * 1000}",
             )
             if (updated != text) sidecar.writeText(updated)
-        }
-    }
-
-    /** Drop files that are no longer part of the collection, and orphan caches. */
-    private fun pruneImportedDirectory(directory: File, keep: List<String>) {
-        val keepPaths = keep.toHashSet()
-        directory.listFiles()?.forEach { file ->
-            val path = file.absolutePath
-            if (keepPaths.contains(path)) return@forEach
-            val basePath = SIDECAR_SUFFIXES
-                .firstOrNull { path.endsWith(it) }
-                ?.let { path.substring(0, path.length - it.length) }
-            val isOrphanSidecar = basePath != null && !keepPaths.contains(basePath)
-            val isDroppedMedia = basePath == null && isSupportedScoreFile(file.name)
-            if (isOrphanSidecar || isDroppedMedia) file.delete()
         }
     }
 

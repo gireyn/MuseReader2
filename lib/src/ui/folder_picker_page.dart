@@ -193,59 +193,75 @@ class _FolderPickerPageState extends State<FolderPickerPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          onPressed: _importing ? null : () => Navigator.of(context).pop(),
-          icon: const Icon(Icons.close_rounded),
-          tooltip: '关闭',
-        ),
-        title: const Text('打开目录', maxLines: 1, overflow: TextOverflow.ellipsis),
-        actions: [
-          IconButton(
-            onPressed: _importing ? null : _grantFolder,
-            icon: const Icon(Icons.folder_open_rounded),
-            tooltip: '更换目录',
+    // The platform owns the import copy and cannot cancel it, so leaving the
+    // page while it runs would throw its result away: the system back gesture
+    // waits for it exactly like 确认目录 does.
+    return PopScope(
+      canPop: !_importing,
+      child: Scaffold(
+        appBar: AppBar(
+          leading: IconButton(
+            onPressed: _importing ? null : () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.close_rounded),
+            tooltip: '关闭',
           ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: SafeArea(
-        top: false,
-        child: Column(
-          children: [
-            if (_initializing)
-              const Expanded(child: Center(child: CircularProgressIndicator()))
-            else if (_treeUri == null)
-              const Expanded(child: SizedBox.shrink())
-            else ...[
-              _Breadcrumbs(pathNames: _pathNames, onJump: _jumpToCrumb),
-              if (_error != null)
-                _FolderErrorStrip(message: _error!, onGrant: _grantFolder),
-              if (_loading)
-                const LinearProgressIndicator(minHeight: 2)
-              else
-                const SizedBox(height: 2),
-              Expanded(
-                child: _FolderContentsList(
-                  contents: _contents,
-                  loading: _loading,
-                  onEnterFolder: _enterFolder,
-                  hint: _error == null ? '此目录下没有可直接导入的内容。' : null,
-                ),
-              ),
-            ],
+          title: const Text(
+            '打开目录',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          actions: [
+            IconButton(
+              onPressed: _importing ? null : _grantFolder,
+              icon: const Icon(Icons.folder_open_rounded),
+              tooltip: '更换目录',
+            ),
+            const SizedBox(width: 8),
           ],
         ),
+        body: SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              if (_initializing)
+                const Expanded(
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (_treeUri == null)
+                const Expanded(child: SizedBox.shrink())
+              else ...[
+                _Breadcrumbs(pathNames: _pathNames, onJump: _jumpToCrumb),
+                if (_error != null)
+                  _FolderErrorStrip(message: _error!, onGrant: _grantFolder),
+                if (_loading)
+                  const LinearProgressIndicator(minHeight: 2)
+                else
+                  const SizedBox(height: 2),
+                Expanded(
+                  child: _FolderContentsList(
+                    contents: _contents,
+                    loading: _loading,
+                    onEnterFolder: _enterFolder,
+                    hint: _error == null ? '此目录下没有可直接导入的内容。' : null,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        bottomNavigationBar: _treeUri == null || _initializing
+            ? null
+            : _FolderActionsBar(
+                importing: _importing,
+                // A folder that could not be listed must not be confirmable:
+                // importing it would replace the collection with nothing.
+                canConfirm: !_importing && !_loading && _error == null,
+                onConfirm: _confirmFolder,
+                onCancel: _importing
+                    ? null
+                    : () => Navigator.of(context).pop(),
+              ),
       ),
-      bottomNavigationBar: _treeUri == null || _initializing
-          ? null
-          : _FolderActionsBar(
-              importing: _importing,
-              canConfirm: !_importing && !_loading,
-              onConfirm: _confirmFolder,
-              onCancel: _importing ? null : () => Navigator.of(context).pop(),
-            ),
     );
   }
 }

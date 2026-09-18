@@ -144,35 +144,29 @@ class FilePickerService {
     }
   }
 
-  /// Import every valid score file found DIRECTLY inside [documentId] of the
-  /// granted tree (non-recursive). The platform side clears the app's import
-  /// directory first, so the library collection is replaced by the folder's
-  /// scores. Returns the absolute paths of the imported files in display
-  /// order; an empty list means the folder contained no supported score.
-  /// Platform failures are rethrown so the caller can tell them apart from an
-  /// empty folder.
+  /// Import every valid score or audio file found DIRECTLY inside [documentId]
+  /// of the granted tree (non-recursive). The platform side replaces the app's
+  /// import directory, so the library collection becomes the folder's files.
+  /// Returns their absolute paths in display order; an empty list means the
+  /// folder contained nothing supported.
+  ///
+  /// The copy belongs to the platform, so this waits for its committed result:
+  /// a Dart timeout cannot cancel native work, and a slow provider must never
+  /// look like an empty folder — the library page replaces the whole
+  /// collection with whatever comes back. A missing result therefore throws
+  /// instead of returning an empty list.
   Future<List<String>> importScoreFolder(
     String treeUri,
     String documentId,
   ) async {
-    try {
-      final invocation = _channel.invokeMethod<List<dynamic>>(
-        'importScoreFolder',
-        <String, Object>{'treeUri': treeUri, 'documentId': documentId},
-      );
-      final timeout = Platform.isAndroid || Platform.isIOS
-          ? const Duration(seconds: 20)
-          : const Duration(milliseconds: 250);
-      final paths = await invocation.timeout(timeout, onTimeout: () => null);
-      if (paths == null) return const [];
-      return paths.whereType<String>().where(_isSupportedScorePath).toList();
-    } on MissingPluginException {
-      return const [];
-    } on PlatformException {
-      rethrow;
-    } on Object {
-      rethrow;
+    final paths = await _channel.invokeMethod<List<dynamic>>(
+      'importScoreFolder',
+      <String, Object>{'treeUri': treeUri, 'documentId': documentId},
+    );
+    if (paths == null) {
+      throw PlatformException(code: 'folder_import_failed');
     }
+    return paths.whereType<String>().where(_isSupportedScorePath).toList();
   }
 
   /// Boolean display preference persisted by the platform side (for example

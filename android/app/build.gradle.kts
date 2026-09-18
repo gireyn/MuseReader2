@@ -145,4 +145,5 @@ flutter {
 
 dependencies {
     implementation(files(museReaderQtAndroidJar))
+    testImplementation("junit:junit:4.13.2")
 }
